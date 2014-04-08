@@ -5,7 +5,7 @@
 -->
 <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
            id="com.msopentech.azure-mobile-services"
-      version="0.1.0">
+      version="0.1.1">
     <name>Windows Azure Mobile Services</name>
     <description>Exposes JavaScript api to access a Windows Azure Mobile Services instance</description>
     <license>Apache 2.0</license>
