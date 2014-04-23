@@ -501,13 +501,13 @@
             UpdatedAt: 2,
             Version: 4,
             All: 0xFFFF
-        }
+        };
         
         var MobileServiceSystemColumns = {
             CreatedAt: "__createdAt",
             UpdatedAt: "__updatedAt",
             Version: "__version"
-        }
+        };
         
         Platform.addToMobileServicesClientNamespace({
             MobileServiceTable:
@@ -2116,7 +2116,9 @@
         
             // Initially we show a page with a spinner. This stays on screen until the login form has loaded.
             var redirectionScript = "<script>location.href = unescape('" + window.escape(startUri) + "')</script>",
-                startPage = "data:text/html," + encodeURIComponent(getSpinnerMarkup() + redirectionScript),
+                spinnerUri = "data:text/html," + encodeURIComponent(getSpinnerMarkup() + redirectionScript),
+                // Windows Phone doesn't support dataURI, so we don't show spinner and navigate directly to login page
+                startPage = cordova.platformId == 'windowsphone' ? startUri : spinnerUri,
                 loginWindow = window.open(startPage, "_blank", "location=no"),
                 flowHasFinished = false,
                 loadEventHandler = function (evt) {
