@@ -2091,13 +2091,17 @@
         // This login UI implementation uses the InAppBrowser plugin which is built into Cordova 2.3.0+.
         
         var requiredCordovaVersion = { major: 2, minor: 3 };
+
+        var isRunUnderRippleEmulator = function() {
+            return window.parent && !!window.parent.ripple;
+        }
         
         exports.supportsCurrentRuntime = function () {
             /// <summary>
             /// Determines whether or not this login UI is usable in the current runtime.
             /// </summary>
-        
-            return !!currentCordovaVersion();
+            // Ripple does not support InAppBrowser functionality. We should use standard login method instead.
+            return !!currentCordovaVersion() && !isRunUnderRippleEmulator();
         };
         
         exports.login = function (startUri, endUri, callback) {

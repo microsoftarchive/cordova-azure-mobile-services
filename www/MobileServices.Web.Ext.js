@@ -20,10 +20,10 @@ function restoreOriginalWindowOpen() {
 }
 
 // special patch to correctly work on Ripple emulator
-if (window.tinyHippos) { // https://gist.github.com/triceam/4658021
+if (window.parent && !!window.parent.ripple) { // alternative way: https://gist.github.com/triceam/4658021
     restoreOriginalWindowOpen();
-    return;
 }
 
+// required for Mobile Services Web SDK to correctly detect cordova version
 window.device = window.device || {};
 window.device.cordova = window.device.cordova || window.cordova.version;
