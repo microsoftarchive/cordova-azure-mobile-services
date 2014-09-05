@@ -2173,9 +2173,11 @@
             var windowsWebAuthBroker = Windows.Security.Authentication.Web.WebAuthenticationBroker;
             var noneWebAuthOptions = Windows.Security.Authentication.Web.WebAuthenticationOptions.none;
             var successWebAuthStatus = Windows.Security.Authentication.Web.WebAuthenticationStatus.success;
+            var activationKindWebAuthContinuation = Windows.ApplicationModel.Activation.ActivationKind.webAuthenticationBrokerContinuation;
         
             var webAuthBrokerSuccessCallback = null;
             var webAuthBrokerErrorCallback = null;
+            var webAuthBrokerContinuationCallback = null;
             if (!_.isNull(callback)) {
                 webAuthBrokerSuccessCallback = function (result) {
                     var error = null;
@@ -2216,13 +2218,32 @@
                 webAuthBrokerErrorCallback = function (error) {
                     callback(error, null);
                 };
+
+                webAuthBrokerContinuationCallback = function (activationArgs) {
+                    if (activationArgs.detail.kind === activationKindWebAuthContinuation) {
+                        var result = activationArgs.detail.webAuthenticationResult;
+                        if (result.responseStatus == successWebAuthStatus) {
+                            webAuthBrokerSuccessCallback(result);
+                        } else {
+                            webAuthBrokerErrorCallback(result);
+                        }
+                        WinJS.Application.removeEventListener('activated', webAuthBrokerContinuationCallback);
+                    }
+                };
             }
-        
+
             if (!_.isNull(endUri)) {
                 var windowsStartUri = new Windows.Foundation.Uri(startUri);
                 var windowsEndUri = new Windows.Foundation.Uri(endUri);
-                windowsWebAuthBroker.authenticateAsync(noneWebAuthOptions, windowsStartUri, windowsEndUri)
-                                    .done(webAuthBrokerSuccessCallback, webAuthBrokerErrorCallback);
+
+                // If authenticateAndContinue method is available, we should use it instead of authenticateAsync
+                if (windowsWebAuthBroker.authenticateAndContinue) {
+                    WinJS.Application.addEventListener('activated', webAuthBrokerContinuationCallback, true);
+                    windowsWebAuthBroker.authenticateAndContinue(windowsStartUri, windowsEndUri);
+                } else {
+                    windowsWebAuthBroker.authenticateAsync(noneWebAuthOptions, windowsStartUri, windowsEndUri)
+                        .done(webAuthBrokerSuccessCallback, webAuthBrokerErrorCallback);
+                }
             }
             else {
                 // If no endURI was given, then we'll use the single sign-on overload of the 
