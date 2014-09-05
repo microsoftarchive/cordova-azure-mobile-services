@@ -10,8 +10,8 @@
     <description>Exposes JavaScript api to access a Windows Azure Mobile Services instance</description>
     <license>Apache 2.0</license>
     <keywords>azure, services, zumo, cloud</keywords>
-    <repo>https://github.com/sgrebnov/cordova-azure-mobile-services/</repo>
-    <issue>https://github.com/sgrebnov/cordova-azure-mobile-services/issues</issue>
+    <repo>https://github.com/msopentech/cordova-azure-mobile-services/</repo>
+    <issue>https://github.com/msopentech/cordova-azure-mobile-services/issues</issue>
 
     <dependency id="org.apache.cordova.inappbrowser"/>
 
