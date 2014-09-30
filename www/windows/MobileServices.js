@@ -2333,7 +2333,8 @@
         exports.getResourceString = function (resourceName) {
             var resourceManager = Windows.ApplicationModel.Resources.Core.ResourceManager.current;
             var resource = resourceManager.mainResourceMap.getValue("MobileServices/Resources/" + resourceName);
-            return resource.valueAsString;
+            // if specified resource does not exist fallback to resource name
+            return (resource != null) ? resource.valueAsString : resourceName;
         };
         
         exports.allowPlatformToMutateOriginal = function (original, updated) {
