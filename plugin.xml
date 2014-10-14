@@ -16,15 +16,21 @@
     <dependency id="org.apache.cordova.inappbrowser"/>
 
     <platform name="windows8">
-        <js-module src="www/windows/MobileServices.js" name="AzureMobileServices">
+        <js-module src="www/MobileServices.Web.Ext.js" name="AzureMobileServices.Ext">
             <runs />
         </js-module> 
+        <js-module src="www/MobileServices.Web-1.2.5.js" name="AzureMobileServices">
+            <runs />
+        </js-module>
     </platform>
 
     <platform name="windows">
-        <js-module src="www/windows/MobileServices.js" name="AzureMobileServices">
+        <js-module src="www/MobileServices.Web.Ext.js" name="AzureMobileServices.Ext">
             <runs />
         </js-module> 
+        <js-module src="www/MobileServices.Web-1.2.5.js" name="AzureMobileServices">
+            <runs />
+        </js-module>
     </platform>
     <platform name="wp8">
         <js-module src="www/MobileServices.Web.Ext.js" name="AzureMobileServices.Ext">
