@@ -1,4 +1,4 @@
-﻿// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 //! Copyright (c) Microsoft Corporation. All rights reserved.
 // ----------------------------------------------------------------------------
 
@@ -15,7 +15,7 @@
     /// will define the module's exports when invoked.
     /// </field>
     var $__modules__ = { };
-    var $__fileVersion__ = "1.0.20203.0";
+    var $__fileVersion__ = "1.2.21003.0";
     
     function require(name) {
         /// <summary>
@@ -65,7 +65,12 @@
             "MobileServiceLogin_LoginErrorResponse"                 : "Cannot start a login operation because login is already in progress.",
             "MobileServiceLogin_InvalidResponseFormat"              : "Invalid format of the authentication response.",
             "MobileServiceLogin_InvalidProvider"                    : "The first parameter must be the name of the autentication provider or a Microsoft Account authentication token.",
-            "MobileServiceTable_NotSingleObject"                    : "Could not get object from response {0}."
+            "MobileServiceTable_NotSingleObject"                    : "Could not get object from response {0}.",
+            "Push_ConflictWithReservedName"                         : "Template name conflicts with reserved name '{0}'.",
+            "Push_InvalidTemplateName"                              : "Template name can't contain ';' or ':'.",
+            "Push_NotSupportedXMLFormatAsBodyTemplateWin8"          : "The bodyTemplate is not in accepted XML format. The first node of the bodyTemplate should be Badge\/Tile\/Toast, except for the wns\/raw template, which need to be a valid XML.",
+            "Push_BodyTemplateMustBeXml"                            : "Valid XML is required for any template without a raw header.",
+            "Push_TagNoCommas"                                      : "Tags must not contain ','."
         };
 
     $__modules__.MobileServiceClient = function (exports) {
@@ -82,6 +87,21 @@
         var Platform = require('Platform');
         var MobileServiceTable = require('MobileServiceTable').MobileServiceTable;
         var MobileServiceLogin = require('MobileServiceLogin').MobileServiceLogin;
+        var Push;
+        try {
+            Push = require('Push').Push;
+        } catch (e) { }
+        
+        var _zumoFeatures = {
+            JsonApiCall: "AJ",               // Custom API call, where the request body is serialized as JSON
+            GenericApiCall: "AG",            // Custom API call, where the request body is sent 'as-is'
+            AdditionalQueryParameters: "QS", // Table or API call, where the caller passes additional query string parameters
+            OptimisticConcurrency: "OC",     // Table update / delete call, using Optimistic Concurrency (If-Match headers)
+            TableRefreshCall: "RF",          // Refresh table call
+            TableReadRaw: "TR",              // Table reads where the caller uses a raw query string to determine the items to be returned
+            TableReadQuery: "TQ",            // Table reads where the caller uses a function / query OM to determine the items to be returned
+        };
+        var _zumoFeaturesHeaderName = "X-ZUMO-FEATURES";
         
         function MobileServiceClient(applicationUrl, applicationKey) {
             /// <summary>
@@ -112,6 +132,7 @@
             this.currentUser = null;
             this._serviceFilter = null;
             this._login = new MobileServiceLogin(this);
+        
             this.getTable = function (tableName) {
                 /// <summary>
                 /// Gets a reference to a table and its data operations.
@@ -123,6 +144,10 @@
                 Validate.notNullOrEmpty(tableName, 'tableName');
                 return new MobileServiceTable(tableName, this);
             };
+        
+            if (Push) {
+                this.push = new Push(this);
+            }
         }
         
         // Export the MobileServiceClient class
@@ -199,7 +224,7 @@
             return client;
         };
         
-        MobileServiceClient.prototype._request = function (method, uriFragment, content, ignoreFilters, headers, callback) {
+        MobileServiceClient.prototype._request = function (method, uriFragment, content, ignoreFilters, headers, features, callback) {
             /// <summary>
             /// Perform a web request and include the standard Mobile Services headers.
             /// </summary>
@@ -220,11 +245,19 @@
             /// <param name="headers" type="Object">
             /// Optional request headers
             /// </param>
+            /// <param name="features" type="Array">
+            /// Codes for features which are used in this request, sent to the server for telemetry.
+            /// </param>
             /// <param name="callback" type="function(error, response)">
             /// Handler that will be called on the response.
             /// </param>
         
             // Account for absent optional arguments
+            if (_.isNull(callback) && (typeof features === 'function')) {
+                callback = features;
+                features = null;
+            }
+        
             if (_.isNull(callback) && (typeof headers === 'function')) {
                 callback = headers;
                 headers = null;
@@ -233,6 +266,11 @@
             if (_.isNull(callback) && (typeof ignoreFilters === 'function')) {
                 callback = ignoreFilters;
                 ignoreFilters = false;
+            }
+            
+            if (_.isNull(callback) && (typeof content === 'function')) {
+                callback = content;
+                content = null;
             }
         
             Validate.isString(method, 'method');
@@ -243,7 +281,11 @@
         
             // Create the absolute URI
             var options = { type: method.toUpperCase() };
-            options.url = _.url.combinePathSegments(this.applicationUrl, uriFragment);
+            if (_.url.isAbsoluteUrl(uriFragment)) {
+                options.url = uriFragment;
+            } else {
+                options.url = _.url.combinePathSegments(this.applicationUrl, uriFragment);
+            }
         
             // Set MobileServices authentication, application, User-Agent and telemetry headers
             options.headers = {};
@@ -262,6 +304,10 @@
             }
             if (!_.isNullOrEmpty["X-ZUMO-VERSION"]) {
                 options.headers["X-ZUMO-VERSION"] = this.version;
+            }
+        
+            if (_.isNull(options.headers[_zumoFeaturesHeaderName]) && features && features.length) {
+                options.headers[_zumoFeaturesHeaderName] = features.join(',');
             }
         
             // Add any content as JSON
@@ -301,6 +347,33 @@
             }
         };
         
+        MobileServiceClient.prototype.loginWithOptions = Platform.async(
+             function (provider, options, callback) {
+                 /// <summary>
+                 /// Log a user into a Mobile Services application given a provider name with
+                 /// given options.
+                 /// </summary>
+                 /// <param name="provider" type="String" mayBeNull="false">
+                 /// Name of the authentication provider to use; one of 'facebook', 'twitter', 'google', 
+                 /// 'windowsazureactivedirectory' (can also use 'aad')
+                 /// or 'microsoftaccount'.
+                 /// </param>
+                 /// <param name="options" type="Object" mayBeNull="true">
+                 /// Contains additional parameter information, valid values are:
+                 ///    token: provider specific object with existing OAuth token to log in with
+                 ///    useSingleSignOn: Only applies to Windows 8 clients.  Will be ignored on other platforms.
+                 /// Indicates if single sign-on should be used. Single sign-on requires that the 
+                 /// application's Package SID be registered with the Microsoft Azure Mobile Service, 
+                 /// but it provides a better experience as HTTP cookies are supported so that users 
+                 /// do not have to login in everytime the application is launched.
+                 ///    parameters: Any additional provider specific query string parameters.
+                 /// </param>
+                 /// <param name="callback" type="Function" mayBeNull="true">
+                 /// Optional callback accepting (error, user) parameters.
+                 /// </param>
+                 this._login.loginWithOptions(provider, options, callback);
+        });
+        
         MobileServiceClient.prototype.login = Platform.async(
             function (provider, token, useSingleSignOn, callback) {
                 /// <summary>
@@ -320,7 +393,7 @@
                 /// <param name="useSingleSignOn" type="Boolean" mayBeNull="true">
                 /// Only applies to Windows 8 clients.  Will be ignored on other platforms.
                 /// Indicates if single sign-on should be used. Single sign-on requires that the 
-                /// application's Package SID be registered with the Windows Azure Mobile Service, 
+                /// application's Package SID be registered with the Microsoft Azure Mobile Service, 
                 /// but it provides a better experience as HTTP cookies are supported so that users 
                 /// do not have to login in everytime the application is launched.
                 /// </param>
@@ -389,6 +462,17 @@
                     urlFragment = _.url.combinePathAndQuery(urlFragment, queryString);
                 }
         
+                var features = [];
+                if (!_.isNullOrEmpty(body)) {
+                    features.push(_.isString(body) ?
+                        _zumoFeatures.GenericApiCall :
+                        _zumoFeatures.JsonApiCall);
+                }
+        
+                if (!_.isNull(parameters)) {
+                    features.push(_zumoFeatures.AdditionalQueryParameters);
+                }
+        
                 // Make the request
                 this._request(
                     method,
@@ -396,17 +480,24 @@
                     body,
                     null,
                     headers,
+                    features,
                     function (error, response) {
                         if (!_.isNull(error)) {
                             callback(error, null);
                         } else {
-                            if (typeof response.getResponseHeader === 'undefined') { // (when using IframeTransport, IE9)
+                            var contentType;
+                            if (typeof response.getResponseHeader !== 'undefined') { // (when not using IframeTransport, IE9)
+                                contentType = response.getResponseHeader('Content-Type');
+                            }
+        
+                            // If there was no header / can't get one, try json
+                            if (!contentType) {
                                 try {
                                     response.result = _.fromJson(response.responseText);
                                 } catch(e) {
                                     // Do nothing, since we don't know the content-type, failing may be ok
                                 }
-                            } else if (response.getResponseHeader('Content-Type').toLowerCase().indexOf('json') !== -1) {
+                            } else if (contentType.toLowerCase().indexOf('json') !== -1) {
                                 response.result = _.fromJson(response.responseText);
                             }
         
@@ -458,7 +549,6 @@
             return applicationInstallationId;
         }
         
-        
         /// <summary>
         /// Get or set the static _applicationInstallationId by checking the settings
         /// and create the value if necessary.
@@ -470,7 +560,10 @@
         /// </summary>
         MobileServiceClient._userAgent = Platform.getUserAgent();
         
-        
+        /// <summary>
+        /// The features that are sent to the server for telemetry.
+        /// </summary>
+        MobileServiceClient._zumoFeatures = _zumoFeatures;
     };
 
     $__modules__.MobileServiceTable = function (exports) {
@@ -494,6 +587,7 @@
         // .../{app}/collections/{coll}.
         var tableRouteSeperatorName = "tables";
         var idNames = ["ID", "Id", "id", "iD"];
+        var nextLinkRegex = /^(.*?);\s*rel\s*=\s*(\w+)\s*$/;
         
         var MobileServiceSystemProperties = {
             None: 0,
@@ -604,10 +698,15 @@
             var tableName = this.getTableName();
             var queryString = null;
             var projection = null;
+            var features = [];
             if (_.isString(query)) {
                 queryString = query;
+                if (!_.isNullOrEmpty(query)) {
+                    features.push(WindowsAzure.MobileServiceClient._zumoFeatures.TableReadRaw);
+                }
             } else if (_.isObject(query) && !_.isNull(query.toOData)) {
                 if (query.getComponents) {
+                    features.push(WindowsAzure.MobileServiceClient._zumoFeatures.TableReadQuery);
                     var components = query.getComponents();
                     projection = components.projection;
                     if (components.table) {
@@ -628,6 +727,8 @@
                 }
             }
         
+            addQueryParametersFeaturesIfApplicable(features, parameters);
+        
             // Add any user-defined query string parameters
             parameters = addSystemProperties(parameters, this.systemProperties, queryString);
             if (!_.isNull(parameters)) {
@@ -641,9 +742,12 @@
             }
             
             // Construct the URL
-            var urlFragment = _.url.combinePathSegments(tableRouteSeperatorName, tableName);
-            if (!_.isNull(queryString)) {
-                urlFragment = _.url.combinePathAndQuery(urlFragment, queryString);
+            var urlFragment = queryString;
+            if (!_.url.isAbsoluteUrl(urlFragment)) {
+                urlFragment = _.url.combinePathSegments(tableRouteSeperatorName, tableName);
+                if (!_.isNull(queryString)) {
+                    urlFragment = _.url.combinePathAndQuery(urlFragment, queryString);
+                }
             }
         
             // Make the request
@@ -651,6 +755,9 @@
                 'GET',
                 urlFragment,
                 null,
+                false,
+                null,
+                features,
                 function (error, response) {
                     var values = null;
                     if (_.isNull(error)) {
@@ -674,6 +781,19 @@
                             var i = 0;
                             for (i = 0; i < values.length; i++) {
                                 values[i] = projection.call(values[i]);
+                            }
+                        }
+        
+                        // Grab link header when possible
+                        if (Array.isArray(values) && response.getResponseHeader && _.isNull(values.nextLink)) {
+                            var link = response.getResponseHeader('Link');
+                            if (!_.isNullOrEmpty(link)) {
+                                var result = nextLinkRegex.exec(link);
+        
+                                // Only add nextLink when relation is next
+                                if (result && result.length === 3 && result[2] == 'next') {
+                                    values.nextLink = result[1];
+                                }
                             }
                         }
                     }
@@ -733,6 +853,8 @@
                     }
                 }
         
+                var features = addQueryParametersFeaturesIfApplicable([], parameters);
+        
                 // Construct the URL
                 var urlFragment = _.url.combinePathSegments(tableRouteSeperatorName, this.getTableName());
                 parameters = addSystemProperties(parameters, this.systemProperties);
@@ -746,6 +868,9 @@
                     'POST',
                     urlFragment,
                     instance,
+                    false,
+                    null,
+                    features,
                     function (error, response) {
                         if (!_.isNull(error)) {
                             callback(error, null);
@@ -772,7 +897,8 @@
                 /// The callback to invoke when the update is complete.
                 /// </param>
                 var version,
-                    headers = [],
+                    headers = {},
+                    features = [],
                     serverInstance;
         
                 // Account for absent optional arguments
@@ -795,6 +921,13 @@
                 } else {
                     serverInstance = instance;
                 }
+        
+                if (!_.isNullOrEmpty(version)) {
+                    headers['If-Match'] = getEtagFromVersion(version);
+                    features.push(WindowsAzure.MobileServiceClient._zumoFeatures.OptimisticConcurrency);
+                }
+        
+                features = addQueryParametersFeaturesIfApplicable(features, parameters);
                 parameters = addSystemProperties(parameters, this.systemProperties);
         
                 // Construct the URL
@@ -807,10 +940,6 @@
                     urlFragment = _.url.combinePathAndQuery(urlFragment, queryString);
                 }
         
-                if (!_.isNullOrEmpty(version)) {
-                    headers['If-Match'] = getEtagFromVersion(version);
-                }
-        
                 // Make the request
                 this.getMobileServiceClient()._request(
                     'PATCH',
@@ -818,12 +947,11 @@
                     serverInstance,
                     false,
                     headers,
+                    features,
                     function (error, response) {
                         if (!_.isNull(error)) {
-                            if (error.request && error.request.status === 412) {
-                                error.serverInstance = _.fromJson(error.request.responseText);
-                            }
-                            callback(error, null);
+                            setServerItemIfPreconditionFailed(error);
+                            callback(error);
                         } else {
                             var result = getItemFromResponse(response);
                             result = Platform.allowPlatformToMutateOriginal(instance, result);
@@ -888,11 +1016,17 @@
                     urlFragment = _.url.combinePathAndQuery(urlFragment, queryString);
                 }
         
+                var features = [WindowsAzure.MobileServiceClient._zumoFeatures.TableRefreshCall];
+                features = addQueryParametersFeaturesIfApplicable(features, parameters);
+        
                 // Make the request
                 this.getMobileServiceClient()._request(
                     'GET',
                     urlFragment,
                     instance,
+                    false,
+                    null,
+                    features,
                     function (error, response) {
                         if (!_.isNull(error)) {
                             callback(error, null);
@@ -949,6 +1083,8 @@
                         this.getTableName(),
                         encodeURIComponent(id.toString()));
         
+                var features = addQueryParametersFeaturesIfApplicable([], parameters);
+        
                 parameters = addSystemProperties(parameters, this.systemProperties);
                 if (!_.isNull(parameters)) {
                     var queryString = _.url.getQueryString(parameters);
@@ -960,6 +1096,9 @@
                     'GET',
                     urlFragment,
                     null,
+                    false,
+                    null,
+                    features,
                     function (error, response) {
                         if (!_.isNull(error)) {
                             callback(error, null);
@@ -989,16 +1128,28 @@
                 if (_.isNull(callback) && (typeof parameters === 'function')) {
                     callback = parameters;
                     parameters = null;
-                }
+                }        
         
                 // Validate the arguments
                 Validate.notNull(instance, 'instance');
                 Validate.isValidId(instance[idPropertyName], 'instance.' + idPropertyName);
+                Validate.notNull(callback, 'callback');
+        
+                var headers = {};
+                var features = [];
+                if (_.isString(instance[idPropertyName])) {
+                    if (!_.isNullOrEmpty(instance.__version)) {
+                        headers['If-Match'] = getEtagFromVersion(instance.__version);
+                        features.push(WindowsAzure.MobileServiceClient._zumoFeatures.OptimisticConcurrency);
+                    }
+                }
+        
+                features = addQueryParametersFeaturesIfApplicable(features, parameters);
+        
                 parameters = addSystemProperties(parameters, this.systemProperties);
                 if (!_.isNull(parameters)) {
                     Validate.isValidParametersObject(parameters);
                 }
-                Validate.notNull(callback, 'callback');
         
                 // Contruct the URL
                 var urlFragment =  _.url.combinePathSegments(
@@ -1015,7 +1166,13 @@
                     'DELETE',
                     urlFragment,
                     null,
+                    false,
+                    headers,
+                    features,
                     function (error, response) {
+                        if (!_.isNull(error)) {
+                            setServerItemIfPreconditionFailed(error);
+                        }
                         callback(error);
                     });
             });
@@ -1076,12 +1233,12 @@
             parameters = parameters || {};
         
             // Don't override system properties if already set
-            if(!_.isNull(parameters['__systemProperties'])) {
+            if(!_.isNull(parameters.__systemProperties)) {
                 return parameters;
             }
         
             if (properties === MobileServiceSystemProperties.All) {
-                parameters['__systemProperties'] = '*';
+                parameters.__systemProperties = '*';
             } else {
                 var options = [];
                 if (MobileServiceSystemProperties.CreatedAt & properties) {
@@ -1093,7 +1250,7 @@
                 if (MobileServiceSystemProperties.Version & properties) {
                     options.push(MobileServiceSystemColumns.Version);
                 }
-                parameters['__systemProperties'] = options.join(',');
+                parameters.__systemProperties = options.join(',');
             }
         
             return parameters;
@@ -1111,6 +1268,13 @@
             return result;
         }
         
+        // Converts an error to precondition failed error
+        function setServerItemIfPreconditionFailed(error) {
+            if (error.request && error.request.status === 412) {
+                error.serverInstance = _.fromJson(error.request.responseText);
+            }
+        }
+        
         // Add wrapping double quotes and escape all double quotes
         function getEtagFromVersion(version) {
             var result = version.replace(/\"/g, '\\\"');
@@ -1126,6 +1290,27 @@
                 result = etag.substr(1, len - 2);
             }
             return result.replace(/\\\"/g, '"');
+        }
+        
+        // Updates and returns the headers parameters with features used in the call
+        function addQueryParametersFeaturesIfApplicable(features, userQueryParameters) {
+            var hasQueryParameters = false;
+            if (userQueryParameters) {
+                if (Array.isArray(userQueryParameters)) {
+                    hasQueryParameters = userQueryParameters.length > 0;
+                } else if (_.isObject(userQueryParameters)) {
+                    for (var k in userQueryParameters) {
+                        hasQueryParameters = true;
+                        break;
+                    }
+                }
+            }
+        
+            if (hasQueryParameters) {
+                features.push(WindowsAzure.MobileServiceClient._zumoFeatures.AdditionalQueryParameters);
+            }
+        
+            return features;
         }
     };
 
@@ -1202,6 +1387,53 @@
         // good enough).
         Platform.addToMobileServicesClientNamespace({ MobileServiceLogin: MobileServiceLogin });
         
+        MobileServiceLogin.prototype.loginWithOptions = function (provider, options, callback) {
+            /// <summary>
+            /// Log a user into a Mobile Services application given a provider name with
+            /// given options.
+            /// </summary>
+            /// <param name="provider" type="String" mayBeNull="false">
+            /// Name of the authentication provider to use; one of 'facebook', 'twitter', 'google', 
+            /// 'windowsazureactivedirectory' (can also use 'aad')
+            /// or 'microsoftaccount'.
+            /// </param>
+            /// <param name="options" type="Object" mayBeNull="true">
+            /// Contains additional parameter information, valid values are:
+            ///    token: provider specific object with existing OAuth token to log in with
+            ///    useSingleSignOn: Only applies to Windows 8 clients.  Will be ignored on other platforms.
+            /// Indicates if single sign-on should be used. Single sign-on requires that the 
+            /// application's Package SID be registered with the Microsoft Azure Mobile Service, 
+            /// but it provides a better experience as HTTP cookies are supported so that users 
+            /// do not have to login in everytime the application is launched.
+            ///    parameters: Any additional provider specific query string parameters.
+            /// </param>
+            /// <param name="callback" type="Function" mayBeNull="true">
+            /// Optional callback accepting (error, user) parameters.
+            /// </param>
+        
+            Validate.isString(provider, 'provider');
+            Validate.notNull(provider, 'provider');
+        
+            if (_.isNull(callback)) {
+                if (!_.isNull(options) && typeof options === 'function') {
+                    callback = options;
+                    options = null;
+                } else {
+                    Validate.notNull(null, 'callback');
+                }
+            }    
+        
+            // loginWithOptions('a.b.c')
+            if (!options && this._isAuthToken(provider)) {
+                this.loginWithMobileServiceToken(provider, callback);
+            } else {
+                // loginWithOptions('facebook', {});
+                // loginWithOptions('facebook');
+                options = options || {};
+                this.loginWithProvider(provider, options.token, options.useSingleSignOn, options.parameters, callback);
+            }
+        };
+        
         MobileServiceLogin.prototype.login = function (provider, token, useSingleSignOn, callback) {
             /// <summary>
             /// Log a user into a Mobile Services application given a provider name and optional token object
@@ -1218,7 +1450,7 @@
             /// <param name="useSingleSignOn" type="Boolean" mayBeNull="true">
             /// Only applies to Windows 8 clients.  Will be ignored on other platforms.
             /// Indicates if single sign-on should be used. Single sign-on requires that the 
-            /// application's Package SID be registered with the Windows Azure Mobile Service, 
+            /// application's Package SID be registered with the Microsoft Azure Mobile Service, 
             /// but it provides a better experience as HTTP cookies are supported so that users 
             /// do not have to login in everytime the application is launched.
             /// </param>
@@ -1247,9 +1479,9 @@
                     useSingleSignOn = false;
                 }
             }
-            
+        
             // Determine if the provider is actually a Mobile Services authentication token
-            if (_.isNull(token) && _.isString(provider) && provider.split('.').length === 3) {
+            if (_.isNull(token) && this._isAuthToken(provider)) {
                 token = provider;
                 provider = null;
             }
@@ -1267,14 +1499,18 @@
         
             if (!_.isNull(provider)) {
                 if (provider.toLowerCase() === 'windowsazureactivedirectory') {
-                    // The mobile service REST API uses '/login/aad' for Windows Azure Active Directory
+                    // The mobile service REST API uses '/login/aad' for Microsoft Azure Active Directory
                     provider = 'aad';
                 }
-                this.loginWithProvider(provider, token, useSingleSignOn, callback);
+                this.loginWithProvider(provider, token, useSingleSignOn, {}, callback);
             }
             else {
                 this.loginWithMobileServiceToken(token, callback);
             }
+        };
+        
+        MobileServiceLogin.prototype._isAuthToken = function (value) {
+            return value && _.isString(value) && value.split('.').length === 3
         };
         
         MobileServiceLogin.prototype.loginWithMobileServiceToken = function(authenticationToken, callback) {
@@ -1304,7 +1540,7 @@
                 });
         };
         
-        MobileServiceLogin.prototype.loginWithProvider = function(provider, token, useSingleSignOn, callback) {
+        MobileServiceLogin.prototype.loginWithProvider = function(provider, token, useSingleSignOn, parameters, callback) {
             /// <summary>
             /// Log a user into a Mobile Services application given a provider name and optional token object.
             /// </summary>
@@ -1312,35 +1548,21 @@
             /// Name of the authentication provider to use; one of 'facebook', 'twitter', 'google',
             /// 'windowsazureactivedirectory' (can also use 'aad'), or 'microsoftaccount'.
             /// </param>
-            /// <param name="token" type="Object" mayBeNull="true">
+            /// <param name="token" type="Object">
             /// Optional, provider specific object with existing OAuth token to log in with.
             /// </param>
-            /// <param name="useSingleSignOn" type="Boolean" mayBeNull="true">
+            /// <param name="useSingleSignOn" type="Boolean">
             /// Optional, indicates if single sign-on should be used.  Single sign-on requires that the
-            /// application's Package SID be registered with the Windows Azure Mobile Service, but it
+            /// application's Package SID be registered with the Microsoft Azure Mobile Service, but it
             /// provides a better experience as HTTP cookies are supported so that users do not have to
             /// login in everytime the application is launched. Is false be default.
             /// </param>
-            /// <param name="callback" type="Function" mayBeNull="true">
+            /// <param name="parameters" type="Object">
+            /// Any additional provider specific query string parameters. 
+            /// </param>
+            /// <param name="callback" type="Function">
             /// The callback to execute when the login completes: callback(error, user).
             /// </param>
-        
-            // Account for absent optional arguments
-            if (_.isNull(callback))
-            {
-                if (_.isNull(useSingleSignOn) && (typeof token === 'function')) {
-                    callback = token;
-                    token = null;
-                    useSingleSignOn = false;
-                } else if (typeof useSingleSignOn === 'function') {
-                    callback = useSingleSignOn;
-                    useSingleSignOn = false;
-                    if (!_.isNull(token) && _.isBool(token)) {
-                        useSingleSignOn = token;
-                        token = null;
-                    }
-                }
-            }
         
             // Validate arguments
             Validate.isString(provider, 'provider');
@@ -1360,10 +1582,10 @@
             
             // Either login with the token or the platform specific login control.
             if (!_.isNull(token)) {
-                loginWithProviderAndToken(this, provider, token, callback);
+                loginWithProviderAndToken(this, provider, token, parameters, callback);
             }
             else {
-                loginWithLoginControl(this, provider, useSingleSignOn, callback);
+                loginWithLoginControl(this, provider, useSingleSignOn, parameters, callback);
             }
         };
         
@@ -1443,7 +1665,7 @@
             onLoginComplete(error, mobileServiceToken, client, callback);
         }
         
-        function loginWithProviderAndToken(login, provider, token, callback) {
+        function loginWithProviderAndToken(login, provider, token, parameters, callback) {
             /// <summary>
             /// Log a user into a Mobile Services application given a provider name and token object.
             /// </summary>
@@ -1457,6 +1679,9 @@
             /// <param name="token" type="Object">
             /// Provider specific object with existing OAuth token to log in with.
             /// </param>
+            /// <param name="parameters" type="Object">
+            /// Any additional provider specific query string parameters.
+            /// </param>
             /// <param name="callback" type="Function" mayBeNull="true">
             /// The callback to execute when the login completes: callback(error, user).
             /// </param>
@@ -1468,11 +1693,17 @@
             // one-at-a-time restriction.
             login._loginState = { inProcess: true, cancelCallback: null };
         
+            var url = loginUrl + '/' + provider;
+            if (!_.isNull(parameters)) {
+                var queryString = _.url.getQueryString(parameters);
+                url = _.url.combinePathAndQuery(url, queryString);
+            }
+        
             // Invoke the POST endpoint to exchange provider-specific token for a 
-            // Windows Azure Mobile Services token
+            // Microsoft Azure Mobile Services token
             client._request(
                 'POST',
-                loginUrl + '/' + provider,
+                url,
                 token,
                 login.ignoreFilters,
                 function (error, response) {
@@ -1481,7 +1712,7 @@
                 });
         }
         
-        function loginWithLoginControl(login, provider, useSingleSignOn, callback) {
+        function loginWithLoginControl(login, provider, useSingleSignOn, parameters, callback) {
             /// <summary>
             /// Log a user into a Mobile Services application using a platform specific
             /// login control that will present the user with the given provider's login web page.
@@ -1494,9 +1725,12 @@
             /// </param>
             /// <param name="useSingleSignOn" type="Boolean">
             /// Optional, indicates if single sign-on should be used.  Single sign-on requires that the
-            /// application's Package SID be registered with the Windows Azure Mobile Service, but it
+            /// application's Package SID be registered with the Microsoft Azure Mobile Service, but it
             /// provides a better experience as HTTP cookies are supported so that users do not have to
             /// login in everytime the application is launched. Is false be default.
+            /// </param>
+            /// <param name="parameters" type="Object">
+            /// Any additional provider specific query string parameters.
             /// </param>
             /// <param name="callback" type="Function"  mayBeNull="true">
             /// The callback to execute when the login completes: callback(error, user).
@@ -1508,6 +1742,11 @@
                 loginUrl,
                 provider);
             var endUri = null;
+        
+            if (!_.isNull(parameters)) {
+                var queryString = _.url.getQueryString(parameters);
+                startUri = _.url.combinePathAndQuery(startUri, queryString);
+            }
         
             // If not single sign-on, then we need to construct a non-null end uri.
             if (!useSingleSignOn) {
@@ -1535,6 +1774,859 @@
         }
     };
 
+    $__modules__.Push = function (exports) {
+        // ----------------------------------------------------------------------------
+        // Copyright (c) Microsoft Corporation. All rights reserved.
+        // ----------------------------------------------------------------------------
+        
+        /// <reference path="C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\base.js" />
+        /// <reference path="C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\ui.js" />
+        /// <reference path="..\Generated\MobileServices.DevIntellisense.js" />
+        
+        var _ = require('Extensions'),
+            Validate = require('Validate'),
+            Platform = require('Platform'),
+            RegistrationManager = require('RegistrationManager').RegistrationManager,
+            apns = function (push) {
+                this._push = push;
+            },
+            gcm = function (push) {
+                this._push = push;
+            };
+        
+        function Push(mobileServicesClient) {
+            this._apns = null;
+            this._gcm = null;
+            this._registrationManager = null;
+        
+            Object.defineProperties(this, {
+                'apns': {
+                    get: function () {
+                        if (!this._apns) {
+                            var name = _.format('MS-PushContainer-apns-{0}', mobileServicesClient.applicationUrl);
+                            this._registrationManager = new RegistrationManager(mobileServicesClient, 'apns', name);
+                            this._apns = new apns(this);
+                        }
+                        return this._apns;
+                    }
+                },
+                'gcm': {
+                    get: function () {
+                        if (!this._gcm) {
+                            var name = _.format('MS-PushContainer-gcm-{0}', mobileServicesClient.applicationUrl);
+                            this._registrationManager = new RegistrationManager(mobileServicesClient, 'apns', name);
+                            this._gcm = new gcm(this);
+                        }
+                        return this._gcm;
+                    }
+                }
+            });
+        }
+        
+        exports.Push = Push;
+        
+        Push.prototype._register = function (platform, pushHandle, tags) {
+            /// <summary>
+            /// Register for native notification
+            /// </summary>
+            /// <param name="deviceToken">
+            /// The deviceToken to register
+            /// </param>
+            /// <param name="tags" mayBeNull="true">
+            /// Array containing the tags for this registeration
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the nregister is completed
+            /// </returns>
+        
+            var registration = makeCoreRegistration(pushHandle, platform, tags);
+            return this._registrationManager.upsertRegistration(registration);
+        };
+        
+        Push.prototype._registerTemplate = function (platform, deviceToken, name, bodyTemplate, expiryTemplate, tags) {
+            /// <summary>
+            /// Register for template notification
+            /// </summary>
+            /// <param name="deviceToken">The deviceToken to register</param>
+            /// <param name="name">The name of the template</param>
+            /// <param name="bodyTemplate">
+            /// The json body to register
+            /// </param>
+            /// <param name="expiryTemplate">
+            /// The json body to register
+            /// </param>
+            /// <param name="tags">
+            /// Array containing the tags for this registeration
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the register is completed
+            /// </returns>
+        
+            Validate.notNullOrEmpty(name, 'name');
+            Validate.notNullOrEmpty(bodyTemplate, 'bodyTemplate');
+        
+            var templateAsString = bodyTemplate,
+                registration = makeCoreRegistration(deviceToken, platform, tags);
+            
+            if (!_.isString(templateAsString)) {
+                templateAsString = JSON.stringify(templateAsString);
+            }
+        
+            registration.templateName = name;
+            registration.templateBody = templateAsString;
+            if (expiryTemplate) {
+                registration.expiry = expiryTemplate;
+            }
+        
+            return this._registrationManager.upsertRegistration(registration);
+        };
+        
+        Push.prototype._unregister = function (templateName) {
+            /// <summary>
+            /// Unregister for template notification
+            /// </summary>
+            /// <param name="templateName">
+            /// The name of the template
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the unregister is completed
+            /// </returns>
+        
+            Validate.notNullOrEmpty(templateName, 'templateName');
+        
+            return this._registrationManager.deleteRegistrationWithName(templateName);
+        };
+        
+        Push.prototype._unregisterAll = function (pushHandle) {
+            /// <summary>
+            /// Unregister for all notifications
+            /// </summary>
+            /// <param name="pushHandle">
+            /// The push handle to unregister everything for
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the unregister is completed
+            /// </returns>
+        
+            Validate.notNullOrEmpty(pushHandle, 'pushHandle');
+        
+            return this._registrationManager.deleteAllRegistrations(pushHandle);
+        };
+        
+        
+        apns.prototype.registerNative = function (deviceToken, tags) {
+            /// <summary>
+            /// Register for native notification
+            /// </summary>
+            /// <param name="deviceToken">
+            /// The deviceToken to register
+            /// </param>
+            /// <param name="tags" mayBeNull="true">
+            /// Array containing the tags for this registeration
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the register is completed
+            /// </returns>
+            
+            return this._push._register('apns', deviceToken, tags);
+        };
+        
+        apns.prototype.registerTemplate = function (deviceToken, name, bodyTemplate, expiryTemplate, tags) {
+            /// <summary>
+            /// Register for template notification
+            /// </summary>
+            /// <param name="deviceToken">The deviceToken to register</param>
+            /// <param name="name">The name of the template</param>
+            /// <param name="bodyTemplate">
+            /// String or json object defining the body of the template register
+            /// </param>
+            /// <param name="expiryTemplate">
+            /// String defining the datatime or template expresession that evaluates to a date time
+            /// string to use for the expiry of the message
+            /// </param>
+            /// <param name="tags">
+            /// Array containing the tags for this registeration
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the unregister is completed
+            /// </returns>
+        
+            if (_.isNull(tags) && !_.isNull(expiryTemplate) && Array.isArray(expiryTemplate)) {
+                tags = expiryTemplate;
+                expiryTemplate = null;
+            }
+        
+            return this._push._registerTemplate('apns', deviceToken, name, bodyTemplate, expiryTemplate, tags);
+        };
+        
+        apns.prototype.unregisterNative = function () {
+            /// <summary>
+            /// Unregister for native notification
+            /// </summary>
+            /// <returns>
+            /// Promise that will complete when the unregister is completed
+            /// </returns>
+        
+            return this._push._unregister(RegistrationManager.NativeRegistrationName);
+        };
+        
+        apns.prototype.unregisterTemplate = function (templateName) {
+            /// <summary>
+            /// Unregister for template notification
+            /// </summary>
+            /// <param name="templateName">
+            /// The name of the template
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the unregister is completed
+            /// </returns>
+        
+            return this._push._unregister(templateName);
+        };
+        
+        apns.prototype.unregisterAll = function (deviceToken) {
+            /// <summary>
+            /// DEBUG-ONLY: Unregisters all registrations for the given device token
+            /// </summary>
+            /// <param name="deviceToken">
+            /// The device token
+            /// </param>
+            /// <returns>
+            /// Promise that will complete once all registrations are deleted
+            /// </returns>
+        
+            return this._push._unregisterAll(deviceToken);
+        };
+        
+        gcm.prototype.registerNative = function (deviceId, tags) {
+            /// <summary>
+            /// Register for native notification
+            /// </summary>
+            /// <param name="deviceId">
+            /// The deviceToken to register
+            /// </param>
+            /// <param name="tags" mayBeNull="true">
+            /// Array containing the tags for this registeration
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the unregister is completed
+            /// </returns>
+        
+            return this._push._register('gcm', deviceId, tags);
+        };
+        
+        gcm.prototype.registerTemplate = function (deviceId, name, bodyTemplate, tags) {
+            /// <summary>
+            /// Register for template notification
+            /// </summary>
+            /// <param name="deviceId">
+            /// The deviceId to register
+            /// </param>
+            /// <param name="name">
+            /// The name of the template
+            /// </param>
+            /// <param name="bodyTemplate">
+            /// String or json object defining the body to register
+            /// </param>
+            /// <param name="tags">
+            /// Array containing the tags for this registeration
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the unregister is completed
+            /// </returns>
+        
+            return this._push._registerTemplate('gcm', deviceId, name, bodyTemplate, null, tags);
+        };
+        
+        gcm.prototype.unregisterNative = function () {
+            /// <summary>
+            /// Unregister for native notification
+            /// </summary>
+            /// <returns>
+            /// Promise that will complete when the register is completed
+            /// </returns>
+        
+            return this._push._unregister(RegistrationManager.NativeRegistrationName);
+        };
+        
+        gcm.prototype.unregisterTemplate = function (templateName) {
+            /// <summary>
+            /// Unregister for template notification
+            /// </summary>
+            /// <param name="templateName">
+            /// The name of the template
+            /// </param>
+            /// <returns>
+            /// Promise that will complete when the register is completed
+            /// </returns>
+            return this._push._unregister(templateName);
+        };
+        
+        gcm.prototype.unregisterAll = function (deviceId) {
+            /// <summary>
+            /// DEBUG-ONLY: Unregisters all registrations for the given device token
+            /// </summary>
+            /// <param name="deviceId">
+            /// The device id
+            /// </param>
+            /// <returns>
+            /// Promise that will complete once all registrations are deleted
+            /// </returns>
+        
+            return this._push._unregisterAll(deviceId);
+        };
+        
+        
+        function makeCoreRegistration(pushHandle, platform, tags) {
+            Validate.notNullOrEmpty(pushHandle, 'pushHandle');
+            Validate.isString(pushHandle, 'pushHandle');
+        
+            if (platform == 'apns') {
+                pushHandle = pushHandle.toUpperCase();
+            }
+        
+            var registration = {
+                platform: platform,
+                deviceId: pushHandle
+            };
+        
+            if (tags) {
+                Validate.isArray(tags, 'tags');
+                registration.tags = tags;
+            }
+        
+            return registration;
+        }
+    };
+
+    $__modules__.RegistrationManager = function (exports) {
+        // ----------------------------------------------------------------------------
+        // Copyright (c) Microsoft Corporation. All rights reserved.
+        // ----------------------------------------------------------------------------
+        
+        /// <reference path="C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\base.js" />
+        /// <reference path="C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\ui.js" />
+        /// <reference path="..\Generated\MobileServices.DevIntellisense.js" />
+        
+        // Declare JSHint globals
+        /*global WinJS:false */
+        
+        var _ = require('Extensions'),
+            Validate = require('Validate'),
+            Platform = require('Platform'),
+            LocalStorageManager = require('LocalStorageManager').LocalStorageManager,
+            PushHttpClient = require('PushHttpClient').PushHttpClient;
+        
+        function RegistrationManager(mobileServicesClient, platform, storageKey) {
+            Validate.notNull(mobileServicesClient, 'mobileServicesClient');
+        
+            this._platform = platform || 'wns';
+            this._pushHttpClient = new PushHttpClient(mobileServicesClient);
+            this._storageManager = new LocalStorageManager(storageKey || mobileServicesClient.applicationUrl);
+        }
+        
+        exports.RegistrationManager = RegistrationManager;
+        
+        RegistrationManager.NativeRegistrationName = LocalStorageManager.NativeRegistrationName;
+        
+        RegistrationManager.prototype.upsertRegistration = Platform.async(
+            function (registration, finalCallback) {
+                Validate.notNull(registration, 'registration');
+                Validate.notNull(finalCallback, 'callback');
+        
+                var self = this,
+                    expiredRegistration = function (callback) {
+                        createRegistration(function (error) {
+                            if (error) {
+                                callback(error);
+                                return;
+                            }
+        
+                            upsertRegistration(false, callback);
+                        });
+                    },
+                    upsertRegistration = function (retry, callback) {
+                        self._pushHttpClient.upsertRegistration(registration, function (error) {
+                            if (retry && error && error.request && error.request.status === 410) {
+                                expiredRegistration(callback);
+                                return;
+                            } else if (!error) {
+                                self._storageManager.pushHandle = registration.deviceId;                        
+                            }
+        
+                            callback(error);
+                        });
+                    },
+                    createRegistration = function (callback) {
+                        self._pushHttpClient.createRegistrationId(function (error, registrationId) {
+                            if (error) {
+                                callback(error);
+                                return;
+                            }
+        
+                            registration.registrationId = registrationId;
+        
+                            self._storageManager.updateRegistrationWithName(
+                                registration.templateName || LocalStorageManager.NativeRegistrationName,
+                                registration.registrationId,
+                                registration.deviceId);
+        
+                            callback();
+                        });
+                    },
+                    firstRegistration = function (callback) {
+                        var name = registration.templateName || LocalStorageManager.NativeRegistrationName,
+                            cachedRegistrationId = self._storageManager.getRegistrationIdWithName(name);
+        
+                        if (!_.isNullOrEmpty(cachedRegistrationId)) {
+                            registration.registrationId = cachedRegistrationId;
+                            upsertRegistration(true, callback);
+                        } else {                
+                            createRegistration(function (error) {
+                                if (error) {
+                                    callback(error);
+                                    return;
+                                }
+                                upsertRegistration(true, callback);
+                            });
+                        }
+                    };
+        
+                if (this._storageManager.isRefreshNeeded) {
+                    // We want the existing handle to win (if present), and slowly update them to the new handle
+                    // So use cached value over the passed in value
+                    this._refreshRegistrations(this._storageManager.pushHandle || registration.deviceId, function (error) {
+                        if (error) {
+                            finalCallback(error);
+                            return;
+                        }
+        
+                        firstRegistration(finalCallback);
+                    });        
+                } else {
+                    firstRegistration(finalCallback);
+                }
+            });
+        
+        RegistrationManager.prototype.deleteRegistrationWithName = Platform.async(
+            function (registrationName, callback) {
+                var cachedRegistrationId = this._storageManager.getRegistrationIdWithName(registrationName),
+                    self = this;
+        
+                if (_.isNullOrEmpty(cachedRegistrationId)) {
+                    callback();
+                    return;
+                }
+        
+                this._pushHttpClient.unregister(cachedRegistrationId, function (error) {
+                    if (!error) {
+                        self._storageManager.deleteRegistrationWithName(registrationName);
+                    }
+                    callback(error);
+                });
+            });
+        
+        RegistrationManager.prototype.deleteAllRegistrations = Platform.async(
+            function (pushHandle, callback) {
+                var self = this,
+                    currentHandle = this._storageManager.pushHandle,
+                    deleteRegistrations = function (error, deleteCallback) {
+                        if (error) {
+                            deleteCallback(error);
+                            return;
+                        }
+        
+                        var registrationIds = self._storageManager.getRegistrationIds(),
+                            remaining = registrationIds.length,
+                            errors = [];
+        
+                        if (remaining === 0) {
+                            self._storageManager.deleteAllRegistrations();
+                            deleteCallback();
+                            return;
+                        }
+        
+                        registrationIds.map(function (registrationId) {
+                            self._pushHttpClient.unregister(registrationId, function (error) {
+                                remaining--;
+        
+                                if (error) {
+                                    errors.push(error);
+                                }
+        
+                                if (remaining <= 0) {
+                                    if (errors.length === 0) {
+                                        self._storageManager.deleteAllRegistrations();
+                                        deleteCallback();
+                                    } else {
+                                        deleteCallback(_.createError('Failed to delete registrations for ' + pushHandle));
+                                    }
+                                }                
+                            });
+                        });
+                    };
+        
+                Validate.notNull(pushHandle, 'pushHandle');
+        
+                // Try to refresh with the local storage copy first, then if different use the requested one
+                this._refreshRegistrations(currentHandle || pushHandle, function (error) {
+                    if (_.isNullOrEmpty(currentHandle) || pushHandle === currentHandle) {
+                        deleteRegistrations(error, callback);
+                    } else {
+                        // Delete the current handle's registrations
+                        deleteRegistrations(error, function (error) {
+                            // Now delete the current handle's registrations as well
+                            // This requires the deleteAllRegistrations() call to clear the cached handle
+                            self._refreshRegistrations(pushHandle, function (error) {
+                                deleteRegistrations(error, callback);
+                            });
+                        });
+                    }
+                });
+            });
+        
+        
+        RegistrationManager.prototype.listRegistrations = Platform.async(
+            function (pushHandle, callback) {
+                /// <summary>
+                /// Retrives a list of all registrations from the server
+                /// </summary>
+        
+                Validate.notNullOrEmpty(pushHandle);
+        
+                this._pushHttpClient.listRegistrations(pushHandle, this._platform, callback);
+            });
+        
+        RegistrationManager.prototype._refreshRegistrations = function (pushHandle, callback) {
+            /// <summary>
+            /// Reloads all registrations for the pushHandle passed in
+            /// </summary>
+        
+            var self = this;
+        
+            Validate.notNull(pushHandle, 'pushHandle');
+            Validate.notNull(callback, 'callback');
+        
+            this._pushHttpClient.listRegistrations(pushHandle, this._platform, function (error, registrations) {
+                if (!error) {
+                    self._storageManager.updateAllRegistrations(registrations, pushHandle);
+                }
+        
+                callback(error);
+            });
+        };
+        
+    };
+
+    $__modules__.LocalStorageManager = function (exports) {
+        // ----------------------------------------------------------------------------
+        // Copyright (c) Microsoft Corporation. All rights reserved.
+        // ----------------------------------------------------------------------------
+        
+        /// <reference path='C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\base.js' />
+        /// <reference path='C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\ui.js' />
+        /// <reference path='..\Generated\MobileServices.DevIntellisense.js' />
+        
+        // Declare JSHint globals
+        /*global WinJS:false, Windows:false */
+        
+        var _ = require('Extensions'),
+            Validate = require('Validate'),
+            Platform = require('Platform'),
+            Constants = {
+                Version: 'v1.1.0',
+                Keys: {
+                    Version: 'Version',
+                    PushHandle: 'ChannelUri',
+                    Registrations: 'Registrations',
+                    NativeRegistration: '$Default'
+                },
+            };
+        
+        function LocalStorageManager(storageKey) {    
+            this._registrations = {};
+            this._storageKey = 'MobileServices.Push.' + storageKey;
+        
+            this._isRefreshNeeded = false;
+            Object.defineProperty(this, 'isRefreshNeeded', {
+                get: function () {
+                    /// <summary>
+                    /// Gets a value indicating whether local storage data needs to be refreshed.
+                    /// </summary>
+                    return this._isRefreshNeeded;
+                }
+            });
+        
+            this._pushHandle = null;
+            Object.defineProperty(this, 'pushHandle', {
+                get: function () {
+                    /// <summary>
+                    /// Gets the DeviceId of all registrations in the LocalStorageManager
+                    /// </summary>  
+                    return _.isNull(this._pushHandle) ? '' : this._pushHandle;
+                },
+                set: function (value) {
+                    Validate.notNullOrEmpty(value, 'pushHandle');
+        
+                    if (this._pushHandle !== value) {
+                        this._pushHandle = value;
+                        this._flushToSettings();
+                    }
+                }
+            });
+        
+            // Initialize our state
+            this._initializeRegistrationInfoFromStorage();
+        }
+        
+        exports.LocalStorageManager = LocalStorageManager;
+        
+        LocalStorageManager.NativeRegistrationName = Constants.Keys.NativeRegistration;
+        
+        LocalStorageManager.prototype.getRegistrationIds = function () {
+            /// <summary>
+            /// Gets an array of all registration Ids
+            /// </summary>
+            /// <returns>
+            /// An array of registration Ids in form of ['1','2','3']
+            /// </returns>
+            var result = [];
+            for (var name in this._registrations) {
+                if (this._registrations.hasOwnProperty(name)) {
+                    result.push(this._registrations[name]);
+                }
+            }
+            return result;
+        };
+        
+        LocalStorageManager.prototype.getRegistrationIdWithName = function (registrationName) {
+            /// <summary>
+            /// Get the registration Id from local storage
+            /// </summary>
+            /// <param name="registrationName">
+            /// The name of the registration mapping to search for
+            /// </param>
+            /// <returns>
+            /// The registration Id if it exists or null if it does not.
+            /// </returns>
+        
+            Validate.notNullOrEmpty(registrationName, 'registrationName');
+        
+            return this._registrations[registrationName];
+        };
+        
+        LocalStorageManager.prototype.updateAllRegistrations = function (registrations, pushHandle) {
+            /// <summary>
+            /// Replace all registrations and the pushHandle with those passed in.
+            /// </summary>
+            /// <param name="registrations">
+            /// An array of registrations to update.
+            /// </param>
+            /// <param name="pushHandle">
+            /// The pushHandle to update.
+            /// </param>
+        
+            Validate.notNull(pushHandle, 'pushHandle');
+            if (!registrations) {
+                registrations = [];
+            }
+            this._registrations = {};
+        
+            for (var i = 0; i < registrations.length; i++) {
+                var name = registrations[i].templateName;
+                if (_.isNullOrEmpty(name)) {
+                    name = Constants.Keys.NativeRegistration;
+                }
+                
+                /// All registrations passed to this method will have registrationId as they
+                /// come directly from notification hub where registrationId is the key field.
+                this._registrations[name] = registrations[i].registrationId;
+            }
+        
+            // Need to flush explictly as handle may not have changed
+            this._pushHandle = pushHandle;
+            this._flushToSettings();
+            this._isRefreshNeeded = false;
+        };
+        
+        LocalStorageManager.prototype.updateRegistrationWithName = function (registrationName, registrationId, pushHandle) {
+            /// <summary>
+            /// Update a registration mapping and the deviceId in local storage by registrationName
+            /// </summary>
+            /// <param name="registrationName">
+            /// The name of the registration mapping to update.
+            /// </param>
+            /// <param name="registrationId">
+            /// The registrationId to update.
+            /// </param>
+            /// <param name="registrationDeviceId">
+            /// The device Id to update the ILocalStorageManager to.
+            /// </param>
+        
+            Validate.notNullOrEmpty(registrationName, 'registrationName');
+            Validate.notNullOrEmpty(registrationId, 'registrationId');
+            Validate.notNullOrEmpty(pushHandle, 'pushHandle');
+        
+            // TODO: We could check if the Id or Name has actually changed
+            this._registrations[registrationName] = registrationId;
+        
+            this._pushHandle = pushHandle;
+            this._flushToSettings();
+        };
+        
+        LocalStorageManager.prototype.deleteRegistrationWithName = function (registrationName) {
+            /// <summary>
+            /// Delete a registration from local storage by name
+            /// </summary>
+            /// <param name="registrationName">
+            /// The name of the registration mapping to delete.
+            /// </param>
+        
+            Validate.notNullOrEmpty(registrationName, 'registrationName');
+        
+            if (this._registrations.hasOwnProperty(registrationName)) {
+                delete this._registrations[registrationName];
+                this._flushToSettings();
+            }
+        };
+        
+        LocalStorageManager.prototype.deleteAllRegistrations = function () {
+            /// <summary>
+            /// Clear all registrations from local storage.
+            /// </summary>
+            this._registrations = {};
+            this._flushToSettings();
+        };
+        
+        // Private methods
+        
+        LocalStorageManager.prototype._flushToSettings = function () {
+            /// <summary>
+            /// Writes all registrations to storage
+            /// </summary>
+        
+            var forStorage = {};
+            forStorage[Constants.Keys.Version] = Constants.Version;
+            forStorage[Constants.Keys.PushHandle] = this._pushHandle;
+            forStorage[Constants.Keys.Registrations] = this._registrations;
+        
+            Platform.writeSetting(this._storageKey, JSON.stringify(forStorage));
+        };
+        
+        LocalStorageManager.prototype._initializeRegistrationInfoFromStorage = function () {
+            /// <summary>
+            /// Populates registration information from storage
+            /// </summary>
+        
+            this._registrations = {};
+        
+            try {
+                // Read push handle
+                var data = JSON.parse(Platform.readSetting(this._storageKey));
+        
+                this._pushHandle = data[Constants.Keys.PushHandle];
+                if (!this._pushHandle) {
+                    this._isRefreshNeeded = true;
+                    return;
+                }
+        
+                // Verify this.storage version
+                var version = data[Constants.Keys.Version] || '';
+                this._isRefreshNeeded = (Constants.Version !== version.toLowerCase());
+                if (this._isRefreshNeeded) {
+                    return;
+                }
+        
+                // read registrations
+                this._registrations = data[Constants.Keys.Registrations];
+                
+            } catch (err) {
+                // It is possible that local storage is corrupted by users, bugs or other issues.
+                // If this occurs, force a full refresh.
+                this._isRefreshNeeded = true;
+            }
+        };
+    };
+
+    $__modules__.PushHttpClient = function (exports) {
+        // ----------------------------------------------------------------------------
+        // Copyright (c) Microsoft Corporation. All rights reserved.
+        // ----------------------------------------------------------------------------
+        
+        /// <reference path="C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\base.js" />
+        /// <reference path="C:\Program Files (x86)\Microsoft SDKs\Windows\v8.0\ExtensionSDKs\Microsoft.WinJS.1.0\1.0\DesignTime\CommonConfiguration\Neutral\Microsoft.WinJS.1.0\js\ui.js" />
+        /// <reference path="..\Generated\MobileServices.DevIntellisense.js" />
+        
+        var Platform = require('Platform'),
+            noCacheHeader = { 'If-Modified-Since': 'Mon, 27 Mar 1972 00:00:00 GMT' };
+        
+        function PushHttpClient(mobileServicesClient) {
+            this.mobileServicesClient = mobileServicesClient;
+        }
+        
+        exports.PushHttpClient = PushHttpClient;
+        
+        PushHttpClient.prototype.listRegistrations = function (pushHandle, platform, callback) {
+            this.mobileServicesClient._request(
+                'GET', 
+                '/push/registrations?platform=' + encodeURIComponent(platform) + '&deviceId=' + encodeURIComponent(pushHandle), 
+                null, 
+                null, 
+                noCacheHeader, 
+                function (error, request) {
+                    if (error) {
+                        callback(error);
+                    } else {
+                        callback(null, JSON.parse(request.responseText));
+                    }
+                });
+        };
+        
+        PushHttpClient.prototype.unregister = function (registrationId, callback) {
+            this.mobileServicesClient._request(
+                'DELETE', 
+                '/push/registrations/' + encodeURIComponent(registrationId), 
+                null, 
+                null, 
+                noCacheHeader, 
+                function (error) {
+                    if (error && error.request && error.request.status === 404) {
+                        callback();
+                        return;
+                    }
+                    callback(error);
+                });
+        };
+        
+        PushHttpClient.prototype.createRegistrationId = function (callback) {
+            this.mobileServicesClient._request(
+                'POST', 
+                '/push/registrationIds', 
+                null, 
+                null, 
+                noCacheHeader, 
+                function (error, request) {
+                    if (error) {
+                        callback(error);
+                        return;
+                    }
+        
+                    var locationHeader = request.getResponseHeader('Location');
+                    callback(null, locationHeader.slice(locationHeader.lastIndexOf('/') + 1));
+                });
+        };
+        
+        PushHttpClient.prototype.upsertRegistration = function (registration, callback) {
+            this.mobileServicesClient._request(
+                'PUT', 
+                '/push/registrations/' + encodeURIComponent(registration.registrationId), 
+                registration, 
+                null, 
+                noCacheHeader, 
+                callback);
+        };
+    };
+
     $__modules__.Platform = function (exports) {
         // ----------------------------------------------------------------------------
         // Copyright (c) Microsoft Corporation. All rights reserved.
@@ -1548,9 +2640,16 @@
         var Promises = require('Promises');
         var Resources = require('Resources');
         var inMemorySettingStore = {};
-        if (window.localStorage) {
-            inMemorySettingStore = window.localStorage;
+        
+        try {
+            var key = '___z';
+            localStorage.setItem(key, key);
+            localStorage.removeItem(key);
+            inMemorySettingStore = localStorage;
+        } catch (e) {
+            // localStorage is not available
         }
+        
         var bestAvailableTransport = null;
         var knownTransports = [ // In order of preference
             require('DirectAjaxTransport'),
@@ -2088,20 +3187,18 @@
         // ----------------------------------------------------------------------------
         
         // Note: Cordova is PhoneGap.
-        // This login UI implementation uses the InAppBrowser plugin which is built into Cordova 2.3.0+.
+        // This login UI implementation uses the InAppBrowser plugin,
+        // to install the plugin use the following command
+        //   cordova plugin add org.apache.cordova.inappbrowser
         
-        var requiredCordovaVersion = { major: 2, minor: 3 };
-
-        var isRunUnderRippleEmulator = function() {
-            return window.parent && !!window.parent.ripple;
-        }
+        var requiredCordovaVersion = { major: 3, minor: 0 };
         
         exports.supportsCurrentRuntime = function () {
             /// <summary>
             /// Determines whether or not this login UI is usable in the current runtime.
             /// </summary>
-            // Ripple does not support InAppBrowser functionality. We should use standard login method instead.
-            return !!currentCordovaVersion() && !isRunUnderRippleEmulator();
+        
+            return !!currentCordovaVersion();
         };
         
         exports.login = function (startUri, endUri, callback) {
@@ -2117,40 +3214,48 @@
                             ". Required: " + requiredCordovaVersion.major + "." + requiredCordovaVersion.minor;
                 throw new Error(message);
             }
+            if (!hasInAppBrowser) {
+                var message = 'A required plugin: "org.apache.cordova.inappbrowser" was not detected.';
+                throw new Error(message);
+            }
         
             // Initially we show a page with a spinner. This stays on screen until the login form has loaded.
             var redirectionScript = "<script>location.href = unescape('" + window.escape(startUri) + "')</script>",
-                spinnerUri = "data:text/html," + encodeURIComponent(getSpinnerMarkup() + redirectionScript),
-                // Windows Phone doesn't support dataURI, so we don't show spinner and navigate directly to login page
-                startPage = cordova.platformId == 'windowsphone' ? startUri : spinnerUri,
-                loginWindow = window.open(startPage, "_blank", "location=no"),
-                flowHasFinished = false,
-                loadEventHandler = function (evt) {
-                    if (!flowHasFinished && evt.url.indexOf(endUri) === 0) {
+                startPage = "data:text/html," + encodeURIComponent(getSpinnerMarkup() + redirectionScript);
+        
+            // iOS inAppBrowser issue requires this wrapping
+            setTimeout(function () {
+                var loginWindow = window.open(startPage, "_blank", "location=no"),
+                    flowHasFinished = false,
+                    loadEventHandler = function (evt) {
+                        if (!flowHasFinished && evt.url.indexOf(endUri) === 0) {
+                            flowHasFinished = true;
+                            setTimeout(function () {
+                                loginWindow.close();
+                            }, 500);
+                            var result = parseOAuthResultFromDoneUrl(evt.url);
+                            callback(result.error, result.oAuthToken);
+                        }
+                    };
+        
+                // Ideally we'd just use loadstart because it happens earlier, but it randomly skips
+                // requests on iOS, so we have to listen for loadstop as well (which is reliable).
+                loginWindow.addEventListener('loadstart', loadEventHandler);
+                loginWindow.addEventListener('loadstop', loadEventHandler);
+        
+                loginWindow.addEventListener('exit', function (evt) {
+                    if (!flowHasFinished) {
                         flowHasFinished = true;
-                        loginWindow.close();
-                        var result = parseOAuthResultFromDoneUrl(evt.url);
-                        callback(result.error, result.oAuthToken);
+                        callback("UserCancelled", null);
                     }
-                };
-        
-            // Ideally we'd just use loadstart because it happens earlier, but it randomly skips
-            // requests on iOS, so we have to listen for loadstop as well (which is reliable).
-            loginWindow.addEventListener('loadstart', loadEventHandler);
-            loginWindow.addEventListener('loadstop', loadEventHandler);
-        
-            loginWindow.addEventListener('exit', function (evt) {
-                if (!flowHasFinished) {
-                    flowHasFinished = true;
-                    callback("UserCancelled", null);
-                }
-            });
+                });
+            }, 500);
         };
         
         function currentCordovaVersion() {
-            // If running inside Cordova, returns a string similar to "2.3.0". Otherwise, returns a falsey value.
+            // If running inside Cordova, returns a string similar to "3.5.0". Otherwise, returns a falsey value.
             // Note: We can only detect Cordova after its deviceready event has fired, so don't call login until then.
-            return window.device && window.device.cordova;
+            return window.cordova && window.cordova.version;
         }
         
         function isSupportedCordovaVersion(version) {
@@ -2163,6 +3268,10 @@
                        (major === required.major && minor >= required.minor);
             }
             return false;
+        }
+        
+        function hasInAppBrowser() {
+            return !window.open;
         }
         
         function parseOAuthResultFromDoneUrl(url) {
@@ -2711,6 +3820,18 @@
                 } else {
                     return path + '?' + exports.trimStart(queryString, '?');
                 }
+            },
+        
+            isAbsoluteUrl: function (url) {
+                /// <summary>
+                /// Currently just a simple check if the url begins with http:// or https:/
+                /// </summary>
+                if (_.isNullOrEmpty(url)) {
+                    return false;
+                }
+        
+                var start = url.substring(0, 7).toLowerCase();
+                return (start  == "http://" || start == "https:/");
             }
         };
         
@@ -2750,17 +3871,33 @@
                 } else {
                     // Try to pull out an error message from the response before
                     // defaulting to the status
+                    var isText = false;
+                    if (request.getResponseHeader) {
+                        var contentType = request.getResponseHeader('Content-Type');
+                        if (contentType) {
+                            isText = contentType.toLowerCase().indexOf("text") >= 0;
+                        }
+                    }
+        
                     try {
                         var response = JSON.parse(request.responseText);
-                        error.message =
-                            response.error ||
-                            response.description ||
-                            request.statusText ||
-                            Platform.getResourceString("Extensions_DefaultErrorMessage");
+                        if (typeof response === 'string') {
+                            error.message = response;
+                        } else {
+                            error.message =
+                                response.error ||
+                                response.description ||
+                                request.statusText ||
+                                Platform.getResourceString("Extensions_DefaultErrorMessage");
+                        }
                     } catch (ex) {
-                        error.message =
-                            request.statusText ||
-                            Platform.getResourceString("Extensions_DefaultErrorMessage");
+                        if (isText) {
+                            error.message = request.responseText;
+                        } else {
+                            error.message =
+                                request.statusText ||
+                                Platform.getResourceString("Extensions_DefaultErrorMessage");
+                        }
                     }
                 }
             } else if (_.isString(exceptionOrMessage) && !_.isNullOrEmpty(exceptionOrMessage)) {
@@ -3179,7 +4316,7 @@
         
             if (parseInt(value, 10) !== parseFloat(value)) {
                 throw _.format(
-                    Platform.getResourceString("Validate_TypeCheck_Error"),
+                    Platform.getResourceString("Validate_TypeCheckError"),
                     name || 'Value',
                     'number',
                     typeof value);
@@ -3222,6 +4359,24 @@
             }
         };
         
+        exports.isArray = function (value, name) {
+            /// <summary>
+            /// Ensure the value is an Array.
+            /// </summary>
+            /// <param name="value" mayBeNull="true">The value to check.</param>
+            /// <param name="name" mayBeNull="true" optional="true" type="String">
+            /// Optional name of the value to throw.
+            /// </param>
+        
+            if (!Array.isArray(value)) {
+                throw _.format(
+                    Platform.getResourceString("Validate_TypeCheckError"),
+                    name || 'Value',
+                    'array',
+                    typeof value);
+            }
+        };
+        
         exports.length = function (value, length, name) {
             /// <summary>
             /// Ensure the value is of a given length.
@@ -3250,14 +4405,13 @@
     };
 
     $__modules__.JavaScript = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
-        
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         (function() {
           var JS, JavaScript, JavaScriptToQueryVisitor, PartialEvaluator, esprima;
@@ -3270,99 +4424,99 @@
         
           JavaScriptToQueryVisitor = require('./JavaScriptToQueryVisitor').JavaScriptToQueryVisitor;
         
-          /*
-          # Define operations on JavaScript
-          */
         
+          /*
+           * Define operations on JavaScript
+           */
         
           exports.JavaScript = JavaScript = (function() {
-        
             function JavaScript() {}
         
-            /*
-                    # Static method to transform a constraint specified as a function into
-                    # a QueryExpression tree.
-            */
         
+            /*
+             * Static method to transform a constraint specified as a function into
+             * a QueryExpression tree.
+             */
         
             JavaScript.transformConstraint = function(func, env) {
-              /*
-                          # Parse the body of the function into a JavaScriptExpression tree
-                          # (into a context that also contains its source and manually reified
-                          # environment)
-              */
         
+              /*
+               * Parse the body of the function into a JavaScriptExpression tree
+               * (into a context that also contains its source and manually reified
+               * environment)
+               */
               var context, translator;
               context = JavaScript.getExpression(func, env);
-              /*
-                          # Evaluate any independent subexpressions and turn them into
-                          # literals.
-              */
         
+              /*
+               * Evaluate any independent subexpressions and turn them into
+               * literals.
+               */
               context.expression = PartialEvaluator.evaluate(context);
-              /*
-                          # Convert the JavaScriptExpression tree into a QueryExpression tree
-              */
         
+              /*
+               * Convert the JavaScriptExpression tree into a QueryExpression tree
+               */
               translator = new JavaScriptToQueryVisitor(context);
               return translator.visit(context.expression);
             };
         
-            /*
-                    # Static method to walk a projection specified as a function and
-                    # determine which fields it uses.
-            */
         
+            /*
+             * Static method to walk a projection specified as a function and
+             * determine which fields it uses.
+             */
         
             JavaScript.getProjectedFields = function(func) {
+        
               /*
-                          # This currently returns an empty array which indicates all fields.
-                          # At some point we'll need to go through and walk the expression
-                          # tree for func and see exactly which fields it uses.  This is
-                          # complicated by the fact that we support arbitrary expressions and
-                          # could for example pass 'this' to a nested lambda which means we
-                          # can't just check for MemberExpressions (though in that case we'll
-                          # probably just default to [] rather than trying to do alias
-                          # analysis across function calls, etc.)
-              */
+               * This currently returns an empty array which indicates all fields.
+               * At some point we'll need to go through and walk the expression
+               * tree for func and see exactly which fields it uses.  This is
+               * complicated by the fact that we support arbitrary expressions and
+               * could for example pass 'this' to a nested lambda which means we
+               * can't just check for MemberExpressions (though in that case we'll
+               * probably just default to [] rather than trying to do alias
+               * analysis across function calls, etc.)
+               */
               return [];
             };
         
-            /*
-                    # Turn a function and its explicitly passed environment into an
-                    # expression tree
-            */
         
+            /*
+             * Turn a function and its explicitly passed environment into an
+             * expression tree
+             */
         
             JavaScript.getExpression = function(func, env) {
-              /*
-                          # An anonymous function isn't considered a valid program, so we'll wrap
-                          # it in an assignment statement to keep the parser happy
-              */
         
+              /*
+               * An anonymous function isn't considered a valid program, so we'll wrap
+               * it in an assignment statement to keep the parser happy
+               */
               var environment, expr, i, name, names, program, source, _i, _len, _ref, _ref1, _ref10, _ref11, _ref12, _ref13, _ref2, _ref3, _ref4, _ref5, _ref6, _ref7, _ref8, _ref9;
               source = "var _$$_stmt_$$_ = " + func + ";";
-              /*
-                          # Use esprima to parse the source of the function body (and have it
-                          # return source locations in character ranges )
-              */
         
+              /*
+               * Use esprima to parse the source of the function body (and have it
+               * return source locations in character ranges )
+               */
               program = esprima.parse(source, {
                 range: true
-                /*
-                            # Get the expression from return statement of the function body to use
-                            # as our lambda expression
-                */
-        
               });
+        
+              /*
+               * Get the expression from return statement of the function body to use
+               * as our lambda expression
+               */
               expr = (program != null ? program.type : void 0) === 'Program' && (program != null ? (_ref = program.body) != null ? _ref.length : void 0 : void 0) === 1 && ((_ref1 = program.body[0]) != null ? _ref1.type : void 0) === 'VariableDeclaration' && ((_ref2 = program.body[0]) != null ? (_ref3 = _ref2.declarations) != null ? _ref3.length : void 0 : void 0) === 1 && ((_ref4 = program.body[0].declarations[0]) != null ? _ref4.type : void 0) === 'VariableDeclarator' && ((_ref5 = program.body[0].declarations[0]) != null ? (_ref6 = _ref5.init) != null ? _ref6.type : void 0 : void 0) === 'FunctionExpression' && ((_ref7 = program.body[0].declarations[0].init) != null ? (_ref8 = _ref7.body) != null ? _ref8.type : void 0 : void 0) === 'BlockStatement' && ((_ref9 = program.body[0].declarations[0].init.body) != null ? (_ref10 = _ref9.body) != null ? _ref10.length : void 0 : void 0) === 1 && ((_ref11 = program.body[0].declarations[0].init.body.body[0]) != null ? _ref11.type : void 0) === 'ReturnStatement' && ((_ref12 = program.body[0].declarations[0].init.body.body[0]) != null ? _ref12.argument : void 0);
               if (!expr) {
                 throw "Expected a predicate with a single return statement, not " + func;
               }
-              /*
-                          # Create the environment mqpping parameters to values
-              */
         
+              /*
+               * Create the environment mqpping parameters to values
+               */
               names = (_ref13 = program.body[0].declarations[0].init.params) != null ? _ref13.map(function(p) {
                 return p.name;
               }) : void 0;
@@ -3377,10 +4531,10 @@
                 environment[name] = env[i];
               }
               return {
-                /*
-                            # Return the environment context
-                */
         
+                /*
+                 * Return the environment context
+                 */
                 source: source,
                 expression: expr,
                 environment: environment
@@ -3395,31 +4549,29 @@
     };
 
     $__modules__.JavaScriptNodes = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         
         /*
-        # Define the Esprima node structure for JavaScript parse trees.  This is mostly
-        # identical to the SpiderMonkey API defined at
-        # https://developer.mozilla.org/en/SpiderMonkey/Parser_API without any of the
-        # SpiderMonkey specifics and a few simplifications made by Esprima (i.e. it
-        # doesn't have separate objects for operator types, etc.).
-        #
-        # It's important to note that the Esprima parse tree will return object literals
-        # and not instances of these types.  They're provided primarily for reference
-        # and for easily constructing new subtrees during transformations by visitors.
-        */
+         * Define the Esprima node structure for JavaScript parse trees.  This is mostly
+         * identical to the SpiderMonkey API defined at
+         * https://developer.mozilla.org/en/SpiderMonkey/Parser_API without any of the
+         * SpiderMonkey specifics and a few simplifications made by Esprima (i.e. it
+         * doesn't have separate objects for operator types, etc.).
+         *
+         * It's important to note that the Esprima parse tree will return object literals
+         * and not instances of these types.  They're provided primarily for reference
+         * and for easily constructing new subtrees during transformations by visitors.
+         */
         
         
-        /* Get the base Node and Visitor classes.
-        */
-        
+        /* Get the base Node and Visitor classes. */
         
         (function() {
           var ArrayExpression, ArrayPattern, AssignmentExpression, BinaryExpression, BlockStatement, BreakStatement, CallExpression, CatchClause, ConditionalExpression, ContinueStatement, DebuggerStatement, Declaration, DoWhileStatement, EmptyStatement, Expression, ExpressionStatement, ForInStatement, ForStatement, Function, FunctionDeclaration, FunctionExpression, Identifier, IfStatement, JavaScriptNode, JavaScriptVisitor, LabeledStatement, Literal, LogicalExpression, MemberExpression, NewExpression, Node, ObjectExpression, ObjectPattern, Pattern, Program, ReturnStatement, SequenceExpression, Statement, SwitchCase, SwitchStatement, ThisExpression, ThrowStatement, TryStatement, UnaryExpression, UpdateExpression, VariableDeclaration, VariableDeclarator, Visitor, WhileStatement, WithStatement, _ref,
@@ -3428,13 +4580,12 @@
         
           _ref = require('./Node'), Node = _ref.Node, Visitor = _ref.Visitor;
         
-          /*
-          # Base node for all JavaScript nodes.
-          */
         
+          /*
+           * Base node for all JavaScript nodes.
+           */
         
           exports.JavaScriptNode = JavaScriptNode = (function(_super) {
-        
             __extends(JavaScriptNode, _super);
         
             function JavaScriptNode() {
@@ -3445,13 +4596,12 @@
         
           })(Node);
         
-          /*
-          # Base visitor for all JavaScript nodes.
-          */
         
+          /*
+           * Base visitor for all JavaScript nodes.
+           */
         
           exports.JavaScriptVisitor = JavaScriptVisitor = (function(_super) {
-        
             __extends(JavaScriptVisitor, _super);
         
             function JavaScriptVisitor() {
@@ -3466,19 +4616,18 @@
         
           })(Visitor);
         
-          /*
-          # A complete program source tree.
-          */
         
+          /*
+           * A complete program source tree.
+           */
         
           exports.Program = Program = (function(_super) {
-        
             __extends(Program, _super);
         
-            /*
-                    # @elements: [Statement]
-            */
         
+            /*
+             * @elements: [Statement]
+             */
         
             function Program(elements) {
               this.elements = elements;
@@ -3495,22 +4644,21 @@
             return node;
           };
         
-          /*
-          # A function declaration or expression. The body of the function is a  block
-          # statement.
-          */
         
+          /*
+           * A function declaration or expression. The body of the function is a  block
+           * statement.
+           */
         
           exports.Function = Function = (function(_super) {
-        
             __extends(Function, _super);
         
-            /*
-                    # @id: Identifier | null
-                    # @params: [Pattern]
-                    # @body: BlockStatement
-            */
         
+            /*
+             * @id: Identifier | null
+             * @params: [Pattern]
+             * @body: BlockStatement
+             */
         
             function Function(id, params, body) {
               this.id = id;
@@ -3531,13 +4679,12 @@
             return node;
           };
         
-          /*
-          # Any statement.
-          */
         
+          /*
+           * Any statement.
+           */
         
           exports.Statement = Statement = (function(_super) {
-        
             __extends(Statement, _super);
         
             function Statement() {
@@ -3553,13 +4700,12 @@
             return node;
           };
         
-          /*
-          # An empty statement, i.e., a solitary semicolon.
-          */
         
+          /*
+           * An empty statement, i.e., a solitary semicolon.
+           */
         
           exports.EmptyStatement = EmptyStatement = (function(_super) {
-        
             __extends(EmptyStatement, _super);
         
             function EmptyStatement() {
@@ -3575,19 +4721,18 @@
             return node;
           };
         
-          /*
-          # A block statement, i.e., a sequence of statements surrounded by braces.
-          */
         
+          /*
+           * A block statement, i.e., a sequence of statements surrounded by braces.
+           */
         
           exports.BlockStatement = BlockStatement = (function(_super) {
-        
             __extends(BlockStatement, _super);
         
-            /*
-                    # @body: [Statement]
-            */
         
+            /*
+             * @body: [Statement]
+             */
         
             function BlockStatement(body) {
               this.body = body;
@@ -3604,13 +4749,12 @@
             return node;
           };
         
-          /*
-          # An expression statement, i.e., a statement consisting of a single expression.
-          */
         
+          /*
+           * An expression statement, i.e., a statement consisting of a single expression.
+           */
         
           exports.ExpressionStatement = ExpressionStatement = (function(_super) {
-        
             __extends(ExpressionStatement, _super);
         
             function ExpressionStatement() {
@@ -3626,21 +4770,20 @@
             return node;
           };
         
-          /*
-          # An if statement.
-          */
         
+          /*
+           * An if statement.
+           */
         
           exports.IfStatement = IfStatement = (function(_super) {
-        
             __extends(IfStatement, _super);
         
-            /*
-                    # @test: Expression
-                    # @consequent: Statement
-                    # @alternate: Statement | null
-            */
         
+            /*
+             * @test: Expression
+             * @consequent: Statement
+             * @alternate: Statement | null
+             */
         
             function IfStatement(test, consequent, alternate) {
               this.test = test;
@@ -3661,20 +4804,19 @@
             return node;
           };
         
-          /*
-          # A labeled statement, i.e., a statement prefixed by a break/continue label.
-          */
         
+          /*
+           * A labeled statement, i.e., a statement prefixed by a break/continue label.
+           */
         
           exports.LabeledStatement = LabeledStatement = (function(_super) {
-        
             __extends(LabeledStatement, _super);
         
-            /*
-                    # @label: Identifier
-                    # @body: Statement
-            */
         
+            /*
+             * @label: Identifier
+             * @body: Statement
+             */
         
             function LabeledStatement(label, body) {
               this.label = label;
@@ -3693,19 +4835,18 @@
             return node;
           };
         
-          /*
-          # A break statement.
-          */
         
+          /*
+           * A break statement.
+           */
         
           exports.BreakStatement = BreakStatement = (function(_super) {
-        
             __extends(BreakStatement, _super);
         
-            /*
-                    # @label: Identifier | null
-            */
         
+            /*
+             * @label: Identifier | null
+             */
         
             function BreakStatement(label) {
               this.label = label;
@@ -3722,19 +4863,18 @@
             return node;
           };
         
+        
           /*
           A continue statement.
-          */
-        
+           */
         
           exports.ContinueStatement = ContinueStatement = (function(_super) {
-        
             __extends(ContinueStatement, _super);
         
-            /*
-                    @label: Identifier | null
-            */
         
+            /*
+            @label: Identifier | null
+             */
         
             function ContinueStatement(label) {
               this.label = label;
@@ -3751,20 +4891,19 @@
             return node;
           };
         
-          /*
-          # A with statement.
-          */
         
+          /*
+           * A with statement.
+           */
         
           exports.WithStatement = WithStatement = (function(_super) {
-        
             __extends(WithStatement, _super);
         
-            /*
-                    # @object: Expression
-                    # @body: Statement
-            */
         
+            /*
+             * @object: Expression
+             * @body: Statement
+             */
         
             function WithStatement(object, body) {
               this.object = object;
@@ -3783,20 +4922,19 @@
             return node;
           };
         
-          /*
-          # A switch statement.
-          */
         
+          /*
+           * A switch statement.
+           */
         
           exports.SwitchStatement = SwitchStatement = (function(_super) {
-        
             __extends(SwitchStatement, _super);
         
-            /*
-                    # @discriminant: Expression
-                    # @cases: [SwitchCase]
-            */
         
+            /*
+             * @discriminant: Expression
+             * @cases: [SwitchCase]
+             */
         
             function SwitchStatement(discriminant, cases) {
               this.discriminant = discriminant;
@@ -3815,19 +4953,18 @@
             return node;
           };
         
-          /*
-          # A return statement.
-          */
         
+          /*
+           * A return statement.
+           */
         
           exports.ReturnStatement = ReturnStatement = (function(_super) {
-        
             __extends(ReturnStatement, _super);
         
-            /*
-                    # @argument: Expression | null
-            */
         
+            /*
+             * @argument: Expression | null
+             */
         
             function ReturnStatement(argument) {
               this.argument = argument;
@@ -3844,19 +4981,18 @@
             return node;
           };
         
-          /*
-          # A throw statement.
-          */
         
+          /*
+           * A throw statement.
+           */
         
           exports.ThrowStatement = ThrowStatement = (function(_super) {
-        
             __extends(ThrowStatement, _super);
         
-            /*
-                    # @argument: Expression
-            */
         
+            /*
+             * @argument: Expression
+             */
         
             function ThrowStatement(argument) {
               this.argument = argument;
@@ -3873,21 +5009,20 @@
             return node;
           };
         
-          /*
-          # A try statement.
-          */
         
+          /*
+           * A try statement.
+           */
         
           exports.TryStatement = TryStatement = (function(_super) {
-        
             __extends(TryStatement, _super);
         
-            /*
-                    # @block: BlockStatement
-                    # @handlers: [CatchClause]
-                    # @finalizer: BlockStatement | null
-            */
         
+            /*
+             * @block: BlockStatement
+             * @handlers: [CatchClause]
+             * @finalizer: BlockStatement | null
+             */
         
             function TryStatement(block, handlers, finalizer) {
               this.block = block;
@@ -3908,20 +5043,19 @@
             return node;
           };
         
-          /*
-          # A while statement.
-          */
         
+          /*
+           * A while statement.
+           */
         
           exports.WhileStatement = WhileStatement = (function(_super) {
-        
             __extends(WhileStatement, _super);
         
-            /*
-                    # @test: Expression
-                    # @body: Statement
-            */
         
+            /*
+             * @test: Expression
+             * @body: Statement
+             */
         
             function WhileStatement(test, body) {
               this.test = test;
@@ -3940,20 +5074,19 @@
             return node;
           };
         
-          /*
-          # A do/while statement.
-          */
         
+          /*
+           * A do/while statement.
+           */
         
           exports.DoWhileStatement = DoWhileStatement = (function(_super) {
-        
             __extends(DoWhileStatement, _super);
         
-            /*
-                    # @body: Statement
-                    # @test: Expression
-            */
         
+            /*
+             * @body: Statement
+             * @test: Expression
+             */
         
             function DoWhileStatement(body, test) {
               this.body = body;
@@ -3972,22 +5105,21 @@
             return node;
           };
         
-          /*
-          # A for statement.
-          */
         
+          /*
+           * A for statement.
+           */
         
           exports.ForStatement = ForStatement = (function(_super) {
-        
             __extends(ForStatement, _super);
         
-            /*
-                    # @init: VariableDeclaration | Expression | null
-                    # @test: Expression | null
-                    # @update: Expression | null
-                    # @body: Statement
-            */
         
+            /*
+             * @init: VariableDeclaration | Expression | null
+             * @test: Expression | null
+             * @update: Expression | null
+             * @body: Statement
+             */
         
             function ForStatement(init, test, update, body) {
               this.init = init;
@@ -4010,21 +5142,20 @@
             return node;
           };
         
-          /*
-          # A for/in statement, or, if each is true, a for each/in statement.
-          */
         
+          /*
+           * A for/in statement, or, if each is true, a for each/in statement.
+           */
         
           exports.ForInStatement = ForInStatement = (function(_super) {
-        
             __extends(ForInStatement, _super);
         
-            /*
-                    # @left: VariableDeclaration |  Expression
-                    # @right: Expression
-                    # @body: Statement
-            */
         
+            /*
+             * @left: VariableDeclaration |  Expression
+             * @right: Expression
+             * @body: Statement
+             */
         
             function ForInStatement(left, right, body) {
               this.left = left;
@@ -4045,13 +5176,12 @@
             return node;
           };
         
-          /*
-          # A debugger statement.
-          */
         
+          /*
+           * A debugger statement.
+           */
         
           exports.DebuggerStatement = DebuggerStatement = (function(_super) {
-        
             __extends(DebuggerStatement, _super);
         
             function DebuggerStatement() {
@@ -4067,14 +5197,13 @@
             return node;
           };
         
-          /*
-          # Any declaration node. Note that declarations are considered statements; this
-          # is because declarations can appear in any statement context in the language.
-          */
         
+          /*
+           * Any declaration node. Note that declarations are considered statements; this
+           * is because declarations can appear in any statement context in the language.
+           */
         
           exports.Declaration = Declaration = (function(_super) {
-        
             __extends(Declaration, _super);
         
             function Declaration() {
@@ -4090,21 +5219,20 @@
             return node;
           };
         
-          /*
-          # A function declaration.  Note: The id field cannot be null.
-          */
         
+          /*
+           * A function declaration.  Note: The id field cannot be null.
+           */
         
           exports.FunctionDeclaration = FunctionDeclaration = (function(_super) {
-        
             __extends(FunctionDeclaration, _super);
         
-            /*
-                    # @id: Identifier
-                    # @params: [ Pattern ]
-                    # @body: BlockStatement | Expression
-            */
         
+            /*
+             * @id: Identifier
+             * @params: [ Pattern ]
+             * @body: BlockStatement | Expression
+             */
         
             function FunctionDeclaration(id, params, body) {
               this.id = id;
@@ -4125,20 +5253,19 @@
             return node;
           };
         
-          /*
-          # A variable declaration, via one of var, let, or const.
-          */
         
+          /*
+           * A variable declaration, via one of var, let, or const.
+           */
         
           exports.VariableDeclaration = VariableDeclaration = (function(_super) {
-        
             __extends(VariableDeclaration, _super);
         
-            /*
-                    # @declarations: [ VariableDeclarator ]
-                    # @kind: "var"
-            */
         
+            /*
+             * @declarations: [ VariableDeclarator ]
+             * @kind: "var"
+             */
         
             function VariableDeclaration(declarations, kind) {
               this.declarations = declarations;
@@ -4156,20 +5283,19 @@
             return node;
           };
         
-          /*
-          # A variable declarator.  Note: The id field cannot be null.
-          */
         
+          /*
+           * A variable declarator.  Note: The id field cannot be null.
+           */
         
           exports.VariableDeclarator = VariableDeclarator = (function(_super) {
-        
             __extends(VariableDeclarator, _super);
         
-            /*
-                    # @id: Pattern
-                    # @init: Expression | null
-            */
         
+            /*
+             * @id: Pattern
+             * @init: Expression | null
+             */
         
             function VariableDeclarator(id, init) {
               this.id = id;
@@ -4188,14 +5314,13 @@
             return node;
           };
         
-          /*
-          # Any expression node. Since the left-hand side of an assignment may be any
-          # expression in general, an expression can also be a pattern.
-          */
         
+          /*
+           * Any expression node. Since the left-hand side of an assignment may be any
+           * expression in general, an expression can also be a pattern.
+           */
         
           exports.Expression = Expression = (function(_super) {
-        
             __extends(Expression, _super);
         
             function Expression() {
@@ -4215,13 +5340,12 @@
             return node;
           };
         
-          /*
-          # A this expression.
-          */
         
+          /*
+           * A this expression.
+           */
         
           exports.ThisExpression = ThisExpression = (function(_super) {
-        
             __extends(ThisExpression, _super);
         
             function ThisExpression() {
@@ -4237,19 +5361,18 @@
             return node;
           };
         
-          /*
-          # An array expression.
-          */
         
+          /*
+           * An array expression.
+           */
         
           exports.ArrayExpression = ArrayExpression = (function(_super) {
-        
             __extends(ArrayExpression, _super);
         
-            /*
-                    # @elements: [ Expression | null ]
-            */
         
+            /*
+             * @elements: [ Expression | null ]
+             */
         
             function ArrayExpression(elements) {
               this.elements = elements;
@@ -4266,24 +5389,23 @@
             return node;
           };
         
-          /*
-          # An object expression. A literal property in an object expression can have
-          # either a string or number as its value.  Ordinary property initializers have a
-          # kind value "init"; getters and setters have the kind values "get" and "set",
-          # respectively.
-          */
         
+          /*
+           * An object expression. A literal property in an object expression can have
+           * either a string or number as its value.  Ordinary property initializers have a
+           * kind value "init"; getters and setters have the kind values "get" and "set",
+           * respectively.
+           */
         
           exports.ObjectExpression = ObjectExpression = (function(_super) {
-        
             __extends(ObjectExpression, _super);
         
-            /*
-                    # @properties: [ { key: Literal | Identifier,
-                    #                 value: Expression,
-                    #                 kind: "init" | "get" | "set" } ];
-            */
         
+            /*
+             * @properties: [ { key: Literal | Identifier,
+             *                 value: Expression,
+             *                 kind: "init" | "get" | "set" } ];
+             */
         
             function ObjectExpression(properties) {
               this.properties = properties;
@@ -4306,21 +5428,20 @@
             return node;
           };
         
-          /*
-          # A function expression.
-          */
         
+          /*
+           * A function expression.
+           */
         
           exports.FunctionExpression = FunctionExpression = (function(_super) {
-        
             __extends(FunctionExpression, _super);
         
-            /*
-                    # @id: Identifier | null
-                    # @params: [ Pattern ]
-                    # @body: BlockStatement | Expression
-            */
         
+            /*
+             * @id: Identifier | null
+             * @params: [ Pattern ]
+             * @body: BlockStatement | Expression
+             */
         
             function FunctionExpression(id, params, body) {
               this.id = id;
@@ -4341,19 +5462,18 @@
             return node;
           };
         
-          /*
-          # A sequence expression, i.e., a comma-separated sequence of expressions.
-          */
         
+          /*
+           * A sequence expression, i.e., a comma-separated sequence of expressions.
+           */
         
           exports.SequenceExpression = SequenceExpression = (function(_super) {
-        
             __extends(SequenceExpression, _super);
         
-            /*
-                    # @expressions: [ Expression ]
-            */
         
+            /*
+             * @expressions: [ Expression ]
+             */
         
             function SequenceExpression(expressions) {
               this.expressions = expressions;
@@ -4370,21 +5490,20 @@
             return node;
           };
         
-          /*
-          # A unary operator expression.
-          */
         
+          /*
+           * A unary operator expression.
+           */
         
           exports.UnaryExpression = UnaryExpression = (function(_super) {
-        
             __extends(UnaryExpression, _super);
         
-            /*
-                    # @operator: "-" | "+" | "!" | "~" | "typeof" | "void" | "delete"
-                    # @prefix: boolean
-                    # @argument: Expression
-            */
         
+            /*
+             * @operator: "-" | "+" | "!" | "~" | "typeof" | "void" | "delete"
+             * @prefix: boolean
+             * @argument: Expression
+             */
         
             function UnaryExpression(operator, prefix, argument) {
               this.operator = operator;
@@ -4403,23 +5522,22 @@
             return node;
           };
         
-          /*
-          # A binary operator expression.
-          */
         
+          /*
+           * A binary operator expression.
+           */
         
           exports.BinaryExpression = BinaryExpression = (function(_super) {
-        
             __extends(BinaryExpression, _super);
         
-            /*
-                    # @operator: "==" | "!=" | "===" | "!==" | "<" | "<=" | ">" | ">="
-                    #     | "<<" | ">>" | ">>>" | "+" | "-" | "*" | "/" | "%"
-                    #     | "|" | "&" | "^" | "in" | "instanceof" | ".."
-                    # @left: Expression
-                    # @right: Expression
-            */
         
+            /*
+             * @operator: "==" | "!=" | "===" | "!==" | "<" | "<=" | ">" | ">="
+             *     | "<<" | ">>" | ">>>" | "+" | "-" | "*" | "/" | "%"
+             *     | "|" | "&" | "^" | "in" | "instanceof" | ".."
+             * @left: Expression
+             * @right: Expression
+             */
         
             function BinaryExpression(operator, left, right) {
               this.operator = operator;
@@ -4439,22 +5557,21 @@
             return node;
           };
         
-          /*
-          # An assignment operator expression.
-          */
         
+          /*
+           * An assignment operator expression.
+           */
         
           exports.AssignmentExpression = AssignmentExpression = (function(_super) {
-        
             __extends(AssignmentExpression, _super);
         
-            /*
-                    # @operator: "=" | "+=" | "-=" | "*=" | "/=" | "%="
-                    #     | "<<=" | ">>=" | ">>>=" | "|=" | "^=" | "&=";
-                    # @left: Expression
-                    # @right: Expression
-            */
         
+            /*
+             * @operator: "=" | "+=" | "-=" | "*=" | "/=" | "%="
+             *     | "<<=" | ">>=" | ">>>=" | "|=" | "^=" | "&=";
+             * @left: Expression
+             * @right: Expression
+             */
         
             function AssignmentExpression(operator, left, right) {
               this.operator = operator;
@@ -4474,21 +5591,20 @@
             return node;
           };
         
-          /*
-          # An update (increment or decrement) operator expression.
-          */
         
+          /*
+           * An update (increment or decrement) operator expression.
+           */
         
           exports.UpdateExpression = UpdateExpression = (function(_super) {
-        
             __extends(UpdateExpression, _super);
         
-            /*
-                    # @operator: "++" | "--"
-                    # @argument: Expression
-                    # @prefix: boolean
-            */
         
+            /*
+             * @operator: "++" | "--"
+             * @argument: Expression
+             * @prefix: boolean
+             */
         
             function UpdateExpression(operator, argument, prefix) {
               this.operator = operator;
@@ -4507,21 +5623,20 @@
             return node;
           };
         
-          /*
-          # A logical operator expression.
-          */
         
+          /*
+           * A logical operator expression.
+           */
         
           exports.LogicalExpression = LogicalExpression = (function(_super) {
-        
             __extends(LogicalExpression, _super);
         
-            /*
-                    # @operator: "||" | "&&"
-                    # @left: Expression
-                    # @right: Expression
-            */
         
+            /*
+             * @operator: "||" | "&&"
+             * @left: Expression
+             * @right: Expression
+             */
         
             function LogicalExpression(operator, left, right) {
               this.operator = operator;
@@ -4541,21 +5656,20 @@
             return node;
           };
         
-          /*
-          # A conditional expression, i.e., a ternary ?/: expression.
-          */
         
+          /*
+           * A conditional expression, i.e., a ternary ?/: expression.
+           */
         
           exports.ConditionalExpression = ConditionalExpression = (function(_super) {
-        
             __extends(ConditionalExpression, _super);
         
-            /*
-                    # @test: Expression
-                    # @alternate: Expression
-                    # @consequent: Expression
-            */
         
+            /*
+             * @test: Expression
+             * @alternate: Expression
+             * @consequent: Expression
+             */
         
             function ConditionalExpression(test, alternate, consequent) {
               this.test = test;
@@ -4576,20 +5690,19 @@
             return node;
           };
         
-          /*
-          # A new expression.
-          */
         
+          /*
+           * A new expression.
+           */
         
           exports.NewExpression = NewExpression = (function(_super) {
-        
             __extends(NewExpression, _super);
         
-            /*
-                    # @callee: Expression
-                    # @arguments: [ Expression ] | null
-            */
         
+            /*
+             * @callee: Expression
+             * @arguments: [ Expression ] | null
+             */
         
             function NewExpression(callee, _arguments) {
               this.callee = callee;
@@ -4608,20 +5721,19 @@
             return node;
           };
         
-          /*
-          # A function or method call expression.
-          */
         
+          /*
+           * A function or method call expression.
+           */
         
           exports.CallExpression = CallExpression = (function(_super) {
-        
             __extends(CallExpression, _super);
         
-            /*
-                    # @callee: Expression
-                    # @arguments: [ Expression ]
-            */
         
+            /*
+             * @callee: Expression
+             * @arguments: [ Expression ]
+             */
         
             function CallExpression(callee, _arguments) {
               this.callee = callee;
@@ -4640,23 +5752,22 @@
             return node;
           };
         
-          /*
-          # A member expression. If computed === true, the node corresponds to a computed
-          # e1[e2] expression and property is an Expression. If computed === false, the
-          # node corresponds to a static e1.x expression and property is an Identifier.
-          */
         
+          /*
+           * A member expression. If computed === true, the node corresponds to a computed
+           * e1[e2] expression and property is an Expression. If computed === false, the
+           * node corresponds to a static e1.x expression and property is an Identifier.
+           */
         
           exports.MemberExpression = MemberExpression = (function(_super) {
-        
             __extends(MemberExpression, _super);
         
-            /*
-                    # @object: Expression
-                    # @property: Identifier | Expression
-                    # @computed : boolean
-            */
         
+            /*
+             * @object: Expression
+             * @property: Identifier | Expression
+             * @computed : boolean
+             */
         
             function MemberExpression(object, property, computed) {
               this.object = object;
@@ -4676,23 +5787,22 @@
             return node;
           };
         
-          /*
-          # JavaScript 1.7 introduced destructuring assignment and binding forms.  All
-          # binding forms (such as function parameters, variable declarations, and catch
-          # block headers), accept array and object destructuring patterns in addition to
-          # plain identifiers. The left-hand sides of assignment expressions can be
-          # arbitrary expressions, but in the case where the expression is an object or
-          # array literal, it is interpreted by SpiderMonkey as a destructuring pattern.
-          #
-          # Since the left-hand side of an assignment can in general be any expression, in
-          # an assignment context, a pattern can be any expression. In binding positions
-          # (such as function parameters, variable declarations, and catch headers),
-          # patterns can only be identifiers in the base case, not arbitrary expressions.
-          */
         
+          /*
+           * JavaScript 1.7 introduced destructuring assignment and binding forms.  All
+           * binding forms (such as function parameters, variable declarations, and catch
+           * block headers), accept array and object destructuring patterns in addition to
+           * plain identifiers. The left-hand sides of assignment expressions can be
+           * arbitrary expressions, but in the case where the expression is an object or
+           * array literal, it is interpreted by SpiderMonkey as a destructuring pattern.
+           *
+           * Since the left-hand side of an assignment can in general be any expression, in
+           * an assignment context, a pattern can be any expression. In binding positions
+           * (such as function parameters, variable declarations, and catch headers),
+           * patterns can only be identifiers in the base case, not arbitrary expressions.
+           */
         
           exports.Pattern = Pattern = (function(_super) {
-        
             __extends(Pattern, _super);
         
             function Pattern() {
@@ -4708,20 +5818,19 @@
             return node;
           };
         
-          /*
-          # An object-destructuring pattern. A literal property in an object pattern can
-          # have either a string or number as its value.
-          */
         
+          /*
+           * An object-destructuring pattern. A literal property in an object pattern can
+           * have either a string or number as its value.
+           */
         
           exports.ObjectPattern = ObjectPattern = (function(_super) {
-        
             __extends(ObjectPattern, _super);
         
-            /*
-                    # @properties: [ { key: Literal | Identifier, value: Pattern } ]
-            */
         
+            /*
+             * @properties: [ { key: Literal | Identifier, value: Pattern } ]
+             */
         
             function ObjectPattern(properties) {
               this.properties = properties;
@@ -4744,19 +5853,18 @@
             return node;
           };
         
-          /*
-          # An array-destructuring pattern.
-          */
         
+          /*
+           * An array-destructuring pattern.
+           */
         
           exports.ArrayPattern = ArrayPattern = (function(_super) {
-        
             __extends(ArrayPattern, _super);
         
-            /*
-                    # @elements: [ Pattern | null ]
-            */
         
+            /*
+             * @elements: [ Pattern | null ]
+             */
         
             function ArrayPattern(elements) {
               this.elements = elements;
@@ -4773,21 +5881,20 @@
             return node;
           };
         
-          /*
-          # A case (if test is an Expression) or default (if test === null) clause in the
-          # body of a switch statement.
-          */
         
+          /*
+           * A case (if test is an Expression) or default (if test === null) clause in the
+           * body of a switch statement.
+           */
         
           exports.SwitchCase = SwitchCase = (function(_super) {
-        
             __extends(SwitchCase, _super);
         
-            /*
-                    # @test: Expression | null
-                    # @consequent: [ Statement ]
-            */
         
+            /*
+             * @test: Expression | null
+             * @consequent: [ Statement ]
+             */
         
             function SwitchCase(test, consequent) {
               this.test = test;
@@ -4806,21 +5913,20 @@
             return node;
           };
         
-          /*
-          # A catch clause following a try block. The optional guard property corresponds
-          # to the optional expression guard on the bound variable.
-          */
         
+          /*
+           * A catch clause following a try block. The optional guard property corresponds
+           * to the optional expression guard on the bound variable.
+           */
         
           exports.CatchClause = CatchClause = (function(_super) {
-        
             __extends(CatchClause, _super);
         
-            /*
-                    # @param: Pattern
-                    # @body: BlockStatement
-            */
         
+            /*
+             * @param: Pattern
+             * @body: BlockStatement
+             */
         
             function CatchClause(param, body) {
               this.param = param;
@@ -4839,20 +5945,19 @@
             return node;
           };
         
-          /*
-          # An identifier. Note that an identifier may be an expression or a destructuring
-          # pattern.
-          */
         
+          /*
+           * An identifier. Note that an identifier may be an expression or a destructuring
+           * pattern.
+           */
         
           exports.Identifier = Identifier = (function(_super) {
-        
             __extends(Identifier, _super);
         
-            /*
-                    # @name: string
-            */
         
+            /*
+             * @name: string
+             */
         
             function Identifier(name) {
               this.name = name;
@@ -4868,19 +5973,18 @@
             return node;
           };
         
-          /*
-          # A literal token. Note that a literal can be an expression.
-          */
         
+          /*
+           * A literal token. Note that a literal can be an expression.
+           */
         
           exports.Literal = Literal = (function(_super) {
-        
             __extends(Literal, _super);
         
-            /*
-                    # @value: string | boolean | null | number | RegExp
-            */
         
+            /*
+             * @value: string | boolean | null | number | RegExp
+             */
         
             function Literal(value) {
               this.value = value;
@@ -4900,14 +6004,13 @@
     };
 
     $__modules__.JavaScriptToQueryVisitor = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
-        
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         (function() {
           var JS, JavaScriptToQueryVisitor, Q, _,
@@ -4920,40 +6023,36 @@
         
           Q = require('./QueryNodes');
         
-          /*
-          # Walk the JavaScriptExpression tree and convert its nodes into QueryExpression
-          # trees
-          */
         
+          /*
+           * Walk the JavaScriptExpression tree and convert its nodes into QueryExpression
+           * trees
+           */
         
           exports.JavaScriptToQueryVisitor = JavaScriptToQueryVisitor = (function(_super) {
-        
             __extends(JavaScriptToQueryVisitor, _super);
         
             function JavaScriptToQueryVisitor(context) {
               this.context = context;
             }
         
-            /* Get the source code for a given node
-            */
         
+            /* Get the source code for a given node */
         
             JavaScriptToQueryVisitor.prototype.getSource = function(node) {
               var _ref, _ref1;
               return this.context.source.slice(node != null ? (_ref = node.range) != null ? _ref[0] : void 0 : void 0, +((node != null ? (_ref1 = node.range) != null ? _ref1[1] : void 0 : void 0) - 1) + 1 || 9e9);
             };
         
-            /* Throw an exception for an invalid node.
-            */
         
+            /* Throw an exception for an invalid node. */
         
             JavaScriptToQueryVisitor.prototype.invalid = function(node) {
               throw "The expression '" + (this.getSource(node)) + "'' is not supported.";
             };
         
-            /* Unary expressions just map operators
-            */
         
+            /* Unary expressions just map operators */
         
             JavaScriptToQueryVisitor.prototype.translateUnary = function(node, mapping) {
               var op, value;
@@ -4966,9 +6065,8 @@
               }
             };
         
-            /* Binary expressions just map operators
-            */
         
+            /* Binary expressions just map operators */
         
             JavaScriptToQueryVisitor.prototype.translateBinary = function(node, mapping) {
               var left, op, right;
@@ -4982,12 +6080,12 @@
               }
             };
         
-            /*
-                    # The base visit method will throw exceptions for any nodes that remain
-                    # untransformed (which allows us to only bother defining meaningful
-                    # translations)
-            */
         
+            /*
+             * The base visit method will throw exceptions for any nodes that remain
+             * untransformed (which allows us to only bother defining meaningful
+             * translations)
+             */
         
             JavaScriptToQueryVisitor.prototype.visit = function(node) {
               var visited;
@@ -5003,14 +6101,12 @@
               expr = (function() {
                 var _ref, _ref1, _ref2, _ref3;
                 if ((node != null ? (_ref = node.object) != null ? _ref.type : void 0 : void 0) === 'ThisExpression' && (node != null ? (_ref1 = node.property) != null ? _ref1.type : void 0 : void 0) === 'Identifier') {
-                  /* Simple member access
-                  */
         
+                  /* Simple member access */
                   return new Q.MemberExpression(node.property.name);
                 } else if ((node != null ? (_ref2 = node.object) != null ? _ref2.type : void 0 : void 0) === 'MemberExpression' && ((_ref3 = node.object.object) != null ? _ref3.type : void 0) === 'ThisExpression' && node.property.type === 'Identifier') {
-                  /* Methods that look like properties
-                  */
         
+                  /* Methods that look like properties */
                   if (node.property.name === 'length') {
                     return new Q.InvocationExpression(Q.Methods.Length, new Q.MemberExpression(node.object.property.name));
                   }
@@ -5026,9 +6122,8 @@
             JavaScriptToQueryVisitor.prototype.UnaryExpression = function(node) {
               var mapping, _ref;
               if (node.operator === '+') {
-                /* Ignore the + in '+52'
-                */
         
+                /* Ignore the + in '+52' */
                 return this.visit(node.argument);
               } else {
                 mapping = {
@@ -5079,11 +6174,11 @@
                 if ((_ref = this.translateBinary(node, mapping)) != null) {
                   return _ref;
                 } else if (node.operator === 'in' && ((_ref1 = node.right) != null ? _ref1.type : void 0) === 'Literal' && _.isArray((_ref2 = node.right) != null ? _ref2.value : void 0)) {
-                  /*
-                                      # Transform the 'foo in [x, y, z]' operator into a series of
-                                      # comparisons like foo == x || foo == y || foo == z.
-                  */
         
+                  /*
+                   * Transform the 'varName in [x, y, z]' operator into a series of
+                   * comparisons like varName == x || varName == y || varName == z.
+                   */
                   if (node.right.value.length > 0) {
                     left = this.visit(node.left);
                     return Q.QueryExpression.groupClauses(Q.BinaryOperators.Or, (function() {
@@ -5092,12 +6187,12 @@
                       _results = [];
                       for (_i = 0, _len = _ref3.length; _i < _len; _i++) {
                         value = _ref3[_i];
-                        /*
-                                                        # If we've got an array of objects who each have
-                                                        # a single property, we'll use the value of that
-                                                        # property.  Otherwise we'll throw an exception.
-                        */
         
+                        /*
+                         * If we've got an array of objects who each have
+                         * a single property, we'll use the value of that
+                         * property.  Otherwise we'll throw an exception.
+                         */
                         if (_.isObject(value)) {
                           properties = (function() {
                             var _results1;
@@ -5118,11 +6213,11 @@
                       return _results;
                     }).call(this));
                   } else {
-                    /*
-                                            # If the array of values is empty, change the query to
-                                            # true == false since it can't be satisfied.
-                    */
         
+                    /*
+                     * If the array of values is empty, change the query to
+                     * true == false since it can't be satisfied.
+                     */
                     return new Q.BinaryExpression(Q.BinaryOperators.Equal, new Q.ConstantExpression(true), new Q.ConstantExpression(false));
                   }
                 } else {
@@ -5132,28 +6227,31 @@
             };
         
             JavaScriptToQueryVisitor.prototype.CallExpression = function(node) {
-              var expr, func, getSingleArg, getTwoArgs, member, method, _ref,
-                _this = this;
-              getSingleArg = function(name) {
-                var _ref;
-                if (((_ref = node["arguments"]) != null ? _ref.length : void 0) !== 1) {
-                  throw "Function " + name + " expects one argument in expression '" + (_this.getSource(node)) + "'";
-                }
-                return _this.visit(node["arguments"][0]);
-              };
-              getTwoArgs = function(member, name) {
-                var _ref;
-                if (((_ref = node["arguments"]) != null ? _ref.length : void 0) !== 2) {
-                  throw "Function " + name + " expects two arguments in expression '" + (_this.getSource(node)) + "'";
-                }
-                return [member, _this.visit(node["arguments"][0]), _this.visit(node["arguments"][1])];
-              };
-              /*
-                          # Translate known method calls that aren't attached to an instance.
-                          # Note that we can compare against the actual method because the
-                          # partial evaluator will have converted it into a literal for us.
-              */
+              var expr, func, getSingleArg, getTwoArgs, member, method, _ref;
+              getSingleArg = (function(_this) {
+                return function(name) {
+                  var _ref;
+                  if (((_ref = node["arguments"]) != null ? _ref.length : void 0) !== 1) {
+                    throw "Function " + name + " expects one argument in expression '" + (_this.getSource(node)) + "'";
+                  }
+                  return _this.visit(node["arguments"][0]);
+                };
+              })(this);
+              getTwoArgs = (function(_this) {
+                return function(member, name) {
+                  var _ref;
+                  if (((_ref = node["arguments"]) != null ? _ref.length : void 0) !== 2) {
+                    throw "Function " + name + " expects two arguments in expression '" + (_this.getSource(node)) + "'";
+                  }
+                  return [member, _this.visit(node["arguments"][0]), _this.visit(node["arguments"][1])];
+                };
+              })(this);
         
+              /*
+               * Translate known method calls that aren't attached to an instance.
+               * Note that we can compare against the actual method because the
+               * partial evaluator will have converted it into a literal for us.
+               */
               func = node != null ? (_ref = node.callee) != null ? _ref.value : void 0 : void 0;
               expr = (function() {
                 var _ref1, _ref2, _ref3, _ref4, _ref5, _ref6, _ref7;
@@ -5164,10 +6262,10 @@
                 } else if (func === Math.round) {
                   return new Q.InvocationExpression(Q.Methods.Round, [getSingleArg('round')]);
                 } else {
-                  /*
-                                      # Translate methods dangling off an instance
-                  */
         
+                  /*
+                   * Translate methods dangling off an instance
+                   */
                   if (node.callee.type === 'MemberExpression' && ((_ref1 = node.callee.object) != null ? _ref1.__hasThisExp : void 0) === true) {
                     if ((node != null ? (_ref2 = node.callee) != null ? (_ref3 = _ref2.object) != null ? _ref3.type : void 0 : void 0 : void 0) === 'CallExpression') {
                       member = this.visit(node.callee.object);
@@ -5194,9 +6292,8 @@
                     } else if (method === 'getYear') {
                       return new Q.BinaryExpression(Q.BinaryOperators.Subtract, new Q.InvocationExpression(Q.Methods.Year, [member]), new Q.ConstantExpression(1900));
                     } else if (method === 'getMonth' || method === 'getUTCMonth') {
-                      /* getMonth is 0 indexed in JavaScript
-                      */
         
+                      /* getMonth is 0 indexed in JavaScript */
                       return new Q.BinaryExpression(Q.BinaryOperators.Subtract, new Q.InvocationExpression(Q.Methods.Month, [member]), new Q.ConstantExpression(1));
                     } else if (method === 'getDate' || method === 'getUTCDate') {
                       return new Q.InvocationExpression(Q.Methods.Day, [member]);
@@ -5215,40 +6312,39 @@
     };
 
     $__modules__.Node = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
-        
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         (function() {
           var Node, Visitor, _;
         
           _ = require('./Utilities');
         
-          /*
-          # The base Node class for all expressions used for analysis and translation by
-          # visitors.  It's designed to interop with other modules that create expression
-          # trees using object literals with a type tag.
-          */
         
+          /*
+           * The base Node class for all expressions used for analysis and translation by
+           * visitors.  It's designed to interop with other modules that create expression
+           * trees using object literals with a type tag.
+           */
         
           exports.Node = Node = (function() {
-            /*
-                # Type tag of the node that allows for eash dispatch in visitors.  This is
-                # automatically set in the constructor (so it's important to call super() in
-                # derived Node classes).
-            */
         
+            /*
+             * Type tag of the node that allows for eash dispatch in visitors.  This is
+             * automatically set in the constructor (so it's important to call super() in
+             * derived Node classes).
+             */
             Node.prototype.type = 'Node';
         
-            /*
-                # Initializes a new instance of the Node class and sets its type tag.
-            */
         
+            /*
+             * Initializes a new instance of the Node class and sets its type tag.
+             */
         
             function Node() {
               this.type = _.functionName(this.constructor);
@@ -5258,19 +6354,18 @@
         
           })();
         
-          /*
-          # Base class for all visitors
-          */
         
+          /*
+           * Base class for all visitors
+           */
         
           exports.Visitor = Visitor = (function() {
-        
             function Visitor() {}
         
-            /*
-                    # Visit a node.
-            */
         
+            /*
+             * Visit a node.
+             */
         
             Visitor.prototype.visit = function(node) {
               var element, _i, _len, _results;
@@ -5290,14 +6385,14 @@
               }
             };
         
-            /*
-                    # Get the source code corresponding to a node.
-            */
         
+            /*
+             * Get the source code corresponding to a node.
+             */
         
             Visitor.prototype.getSource = function(node) {
-              /* It is expected this will be overridden in derived visitors.
-              */
+        
+              /* It is expected this will be overridden in derived visitors. */
               return null;
             };
         
@@ -5309,14 +6404,13 @@
     };
 
     $__modules__.ODataProvider = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
-        
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         (function() {
           var ODataFilterQueryVisitor, ODataProvider, Q, Query, _,
@@ -5330,13 +6424,12 @@
           Query = require('./Query').Query;
         
           exports.ODataProvider = ODataProvider = (function() {
-        
             function ODataProvider() {}
         
-            /*
-                    # Convert a query into an OData URI.
-            */
         
+            /*
+             * Convert a query into an OData URI.
+             */
         
             ODataProvider.prototype.toQuery = function(query) {
               var odata, s, url;
@@ -5369,14 +6462,14 @@
               return url;
             };
         
-            /*
-                    # Translate the query components into OData strings
-            */
         
+            /*
+             * Translate the query components into OData strings
+             */
         
             ODataProvider.prototype.toOData = function(query, encodeForUri) {
               var asc, components, name, odata, ordering, _ref, _ref1;
-              if (!(encodeForUri != null)) {
+              if (encodeForUri == null) {
                 encodeForUri = false;
               }
               components = (_ref = query != null ? query.getComponents() : void 0) != null ? _ref : {};
@@ -5401,10 +6494,10 @@
               };
             };
         
-            /*
-                    # Convert OData components into a query object
-            */
         
+            /*
+             * Convert OData components into a query object
+             */
         
             ODataProvider.prototype.fromOData = function(table, filters, ordering, skip, take, selections, includeTotalCount) {
               var direction, field, item, query, _i, _j, _len, _len1, _ref, _ref1, _ref2, _ref3;
@@ -5451,13 +6544,12 @@
         
           })();
         
-          /*
-          # Visitor that converts query expression trees into OData filter statements.
-          */
         
+          /*
+           * Visitor that converts query expression trees into OData filter statements.
+           */
         
           ODataFilterQueryVisitor = (function(_super) {
-        
             __extends(ODataFilterQueryVisitor, _super);
         
             function ODataFilterQueryVisitor(encodeForUri) {
@@ -5481,12 +6573,12 @@
                 }
                 return "'" + value + "'";
               } else if (_.isDate(value)) {
-                /*
-                            # Dates are expected in the format
-                            #   "datetime'yyyy-mm-ddThh:mm[:ss[.fffffff]]'"
-                            # which JSON.stringify gives us by default
-                */
         
+                /*
+                 * Dates are expected in the format
+                 *   "datetime'yyyy-mm-ddThh:mm[:ss[.fffffff]]'"
+                 * which JSON.stringify gives us by default
+                 */
                 text = JSON.stringify(value);
                 if (text.length > 2) {
                   text = text.slice(1, +(text.length - 2) + 1 || 9e9);
@@ -5609,14 +6701,13 @@
     };
 
     $__modules__.PartialEvaluator = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
-        
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         (function() {
           var IndependenceNominator, JS, PartialEvaluator, _,
@@ -5627,20 +6718,19 @@
         
           JS = require('./JavaScriptNodes');
         
-          /*
-          # Partially evaluate a complex expression in the context of its environment.
-          # This allows us to support arbitrary JavaScript expressions even though we
-          # only explicitly transform a subset of expressions into QueryExpressions.
-          #
-          # For example, assuming we have an expression like (x) -> @id == x + 1 with an
-          # environment where x == 12, then the entire right hand side of the comparison
-          # is independent of any values computed by the query and could be replaced with
-          # the literal value 13.
-          */
         
+          /*
+           * Partially evaluate a complex expression in the context of its environment.
+           * This allows us to support arbitrary JavaScript expressions even though we
+           * only explicitly transform a subset of expressions into QueryExpressions.
+           *
+           * For example, assuming we have an expression like (x) -> @id == x + 1 with an
+           * environment where x == 12, then the entire right hand side of the comparison
+           * is independent of any values computed by the query and could be replaced with
+           * the literal value 13.
+           */
         
           exports.PartialEvaluator = PartialEvaluator = (function(_super) {
-        
             __extends(PartialEvaluator, _super);
         
             function PartialEvaluator(context) {
@@ -5650,27 +6740,27 @@
             PartialEvaluator.prototype.visit = function(node) {
               var key, params, source, thunk, value, values, _ref, _ref1, _ref2, _ref3;
               if (!node.__independent || node.type === 'Literal' || (!node.type)) {
-                /*
-                                # If the node isn't independent or it's already a literal, then
-                                # just keep walking the tree
-                */
         
+                /*
+                 * If the node isn't independent or it's already a literal, then
+                 * just keep walking the tree
+                 */
                 return PartialEvaluator.__super__.visit.call(this, node);
               } else {
-                /*
-                                # Otherwse we'll evaluate the node in the context of the
-                                # environment by either looking up identifiers directly or
-                                # evaluating whole sub expressions
-                */
         
+                /*
+                 * Otherwse we'll evaluate the node in the context of the
+                 * environment by either looking up identifiers directly or
+                 * evaluating whole sub expressions
+                 */
                 if (node.type === 'Identifier' && this.context.environment[node.name]) {
                   return new JS.Literal(this.context.environment[node.name]);
                 } else {
-                  /*
-                                      # Evaluate the source of the sub expression in the context
-                                      # of the environment
-                  */
         
+                  /*
+                   * Evaluate the source of the sub expression in the context
+                   * of the environment
+                   */
                   source = this.context.source.slice(node != null ? (_ref = node.range) != null ? _ref[0] : void 0 : void 0, +((node != null ? (_ref1 = node.range) != null ? _ref1[1] : void 0 : void 0) - 1) + 1 || 9e9);
                   params = (_ref2 = (function() {
                     var _ref3, _results;
@@ -5711,14 +6801,13 @@
         
           })(JS.JavaScriptVisitor);
         
-          /*
-          # Nominate independent nodes in an expression tree that don't depend on any
-          # server side values.
-          */
         
+          /*
+           * Nominate independent nodes in an expression tree that don't depend on any
+           * server side values.
+           */
         
           exports.IndependenceNominator = IndependenceNominator = (function(_super) {
-        
             __extends(IndependenceNominator, _super);
         
             function IndependenceNominator(context) {
@@ -5749,11 +6838,11 @@
             IndependenceNominator.prototype.MemberExpression = function(node) {
               var _ref;
               IndependenceNominator.__super__.MemberExpression.call(this, node);
-              /*
-                          # Undo independence of identifiers when they're members of this.* or
-                          # this.member.* (the latter allows for member functions)
-              */
         
+              /*
+               * Undo independence of identifiers when they're members of this.* or
+               * this.member.* (the latter allows for member functions)
+               */
               node.__hasThisExp = (_ref = node.object) != null ? _ref.__hasThisExp : void 0;
               if (node.__hasThisExp) {
                 node.__independent = false;
@@ -5773,21 +6862,21 @@
             IndependenceNominator.prototype.ObjectExpression = function(node) {
               var independence, setter, _i, _j, _len, _len1, _ref, _ref1;
               IndependenceNominator.__super__.ObjectExpression.call(this, node);
-              /*
-                          # Prevent literal key identifiers from being evaluated out of
-                          # context
-              */
         
+              /*
+               * Prevent literal key identifiers from being evaluated out of
+               * context
+               */
               _ref = node.properties;
               for (_i = 0, _len = _ref.length; _i < _len; _i++) {
                 setter = _ref[_i];
                 setter.key.__independent = false;
               }
-              /*
-                          # An object literal is independent if all of its values are
-                          # independent
-              */
         
+              /*
+               * An object literal is independent if all of its values are
+               * independent
+               */
               independence = true;
               _ref1 = node.properties;
               for (_j = 0, _len1 = _ref1.length; _j < _len1; _j++) {
@@ -5799,20 +6888,20 @@
             };
         
             IndependenceNominator.prototype.visit = function(node) {
-              /*
-                          # Call the base visit method which will both visit all of our
-                          # subexpressions and also call the couple of overrides above which
-                          # handle the base independence cases
-              */
         
+              /*
+               * Call the base visit method which will both visit all of our
+               * subexpressions and also call the couple of overrides above which
+               * handle the base independence cases
+               */
               var independence, isIndependent, name, v, value, _i, _len;
               IndependenceNominator.__super__.visit.call(this, node);
-              /*
-                          # If the node's independence wasn't determined automatically by the
-                          # base cases above, then it's independence is determined by checking
-                          # all of its values and aggregating their independence
-              */
         
+              /*
+               * If the node's independence wasn't determined automatically by the
+               * base cases above, then it's independence is determined by checking
+               * all of its values and aggregating their independence
+               */
               if (!(Object.prototype.hasOwnProperty.call(node, '__independent'))) {
                 independence = true;
                 isIndependent = function(node) {
@@ -5834,9 +6923,8 @@
                     independence &= isIndependent(value);
                   }
                 }
-                /* &= will turn true/false into 1/0 so we'll turn it back
-                */
         
+                /* &= will turn true/false into 1/0 so we'll turn it back */
                 node.__independent = independence ? true : false;
               }
               return node;
@@ -5850,18 +6938,16 @@
     };
 
     $__modules__.Query = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         
-        /* Pull in references
-        */
-        
+        /* Pull in references */
         
         (function() {
           var JavaScript, ODataProvider, Q, Query, _,
@@ -5873,27 +6959,24 @@
         
           JavaScript = require('./JavaScript').JavaScript;
         
-          /*
-          # Define a query that can be translated into a desired query language and
-          # executed remotely.
-          */
         
+          /*
+           * Define a query that can be translated into a desired query language and
+           * executed remotely.
+           */
         
           exports.Query = Query = (function() {
-        
             function Query(table, context) {
               var _context, _filters, _includeTotalCount, _ordering, _projection, _selections, _skip, _table, _take, _version;
               if (!table || !(_.isString(table))) {
                 throw 'Expected the name of a table!';
               }
-              /* Store the table name and any extra context
-              */
         
+              /* Store the table name and any extra context */
               _table = table;
               _context = context;
-              /* Private Query component members
-              */
         
+              /* Private Query component members */
               _filters = null;
               _projection = null;
               _selections = [];
@@ -5901,16 +6984,15 @@
               _skip = null;
               _take = null;
               _includeTotalCount = false;
+        
               /*
-                          # Keep a version flag that's updated on each mutation so we can
-                          # track whether changes have been made.  This is to enable caching
-                          # of compiled queries without reevaluating unless necessary.
-              */
-        
+               * Keep a version flag that's updated on each mutation so we can
+               * track whether changes have been made.  This is to enable caching
+               * of compiled queries without reevaluating unless necessary.
+               */
               _version = 0;
-              /* Get the individual components of the query
-              */
         
+              /* Get the individual components of the query */
               this.getComponents = function() {
                 return {
                   filters: _filters,
@@ -5925,11 +7007,11 @@
                   version: _version
                 };
               };
-              /*
-                          # Set the individual components of the query (this is primarily
-                          # meant to be used for rehydrating a query).
-              */
         
+              /*
+               * Set the individual components of the query (this is primarily
+               * meant to be used for rehydrating a query).
+               */
               this.setComponents = function(components) {
                 var _ref, _ref1, _ref2, _ref3, _ref4, _ref5, _ref6, _ref7, _ref8;
                 _version++;
@@ -5944,33 +7026,33 @@
                 _context = (_ref8 = components != null ? components.context : void 0) != null ? _ref8 : null;
                 return this;
               };
-              /*
-                          # Add a constraint to a query.  Constraints can take the form of
-                          # a function with a single return statement, key/value pairs of
-                          # equality comparisons, or provider-specific literal strings (note
-                          # that not all providers support literals).
-              */
         
+              /*
+               * Add a constraint to a query.  Constraints can take the form of
+               * a function with a single return statement, key/value pairs of
+               * equality comparisons, or provider-specific literal strings (note
+               * that not all providers support literals).
+               */
               this.where = function() {
                 var args, constraint, expr, name, value;
                 constraint = arguments[0], args = 2 <= arguments.length ? __slice.call(arguments, 1) : [];
                 _version++;
-                /*
-                                # Translate the constraint from its high level form into a
-                                # QueryExpression tree that can be manipulated by a query
-                                # provider
-                */
         
+                /*
+                 * Translate the constraint from its high level form into a
+                 * QueryExpression tree that can be manipulated by a query
+                 * provider
+                 */
                 expr = (function() {
                   if (_.isFunction(constraint)) {
                     return JavaScript.transformConstraint(constraint, args);
                   } else if (_.isObject(constraint)) {
-                    /*
-                                            # Turn an object of key value pairs into a series of
-                                            # equality expressions that are and'ed together to form
-                                            # a single expression
-                    */
         
+                    /*
+                     * Turn an object of key value pairs into a series of
+                     * equality expressions that are and'ed together to form
+                     * a single expression
+                     */
                     return Q.QueryExpression.groupClauses(Q.BinaryOperators.And, (function() {
                       var _results;
                       _results = [];
@@ -5981,39 +7063,37 @@
                       return _results;
                     })());
                   } else if (_.isString(constraint)) {
-                    /*
-                                            # Store the literal query along with any arguments for
-                                            # providers that support basic string replacement (i.e.,
-                                            # something like where('name eq ?', 'Steve'))
-                    */
         
+                    /*
+                     * Store the literal query along with any arguments for
+                     * providers that support basic string replacement (i.e.,
+                     * something like where('name eq ?', 'Steve'))
+                     */
                     return new Q.LiteralExpression(constraint, args);
                   } else {
                     throw "Expected a function, object, or string, not " + constraint;
                   }
                 })();
-                /* Merge the new filters with any existing filters
-                */
         
+                /* Merge the new filters with any existing filters */
                 _filters = Q.QueryExpression.groupClauses(Q.BinaryOperators.And, [_filters, expr]);
                 return this;
               };
-              /*
-                          # Project the query results.  A projection can either be defined as
-                          # a set of fields that we'll pull back (instead of the entire row)
-                          # or a function that will transform a row into a new type.  If a
-                          # function is used, we'll analyze the function to pull back the
-                          # minimal number of fields required.
-              */
         
+              /*
+               * Project the query results.  A projection can either be defined as
+               * a set of fields that we'll pull back (instead of the entire row)
+               * or a function that will transform a row into a new type.  If a
+               * function is used, we'll analyze the function to pull back the
+               * minimal number of fields required.
+               */
               this.select = function() {
                 var param, parameters, projectionOrParameter, _i, _len;
                 projectionOrParameter = arguments[0], parameters = 2 <= arguments.length ? __slice.call(arguments, 1) : [];
                 _version++;
                 if (_.isString(projectionOrParameter)) {
-                  /* Add all the literal string parameters
-                  */
         
+                  /* Add all the literal string parameters */
                   _selections.push(projectionOrParameter);
                   for (_i = 0, _len = parameters.length; _i < _len; _i++) {
                     param = parameters[_i];
@@ -6023,9 +7103,8 @@
                     _selections.push(param);
                   }
                 } else if (_.isFunction(projectionOrParameter)) {
-                  /* Set the projection and calculate the fields it uses
-                  */
         
+                  /* Set the projection and calculate the fields it uses */
                   _projection = projectionOrParameter;
                   _selections = JavaScript.getProjectedFields(_projection);
                 } else {
@@ -6075,12 +7154,12 @@
                 _take = count;
                 return this;
               };
-              /*
-                          # Indicate that the query should include the total count for all the
-                          # records that would have been returned ignoring any take paging
-                          # limit clause specified by client or server.
-              */
         
+              /*
+               * Indicate that the query should include the total count for all the
+               * records that would have been returned ignoring any take paging
+               * limit clause specified by client or server.
+               */
               this.includeTotalCount = function() {
                 _version++;
                 _includeTotalCount = true;
@@ -6088,12 +7167,12 @@
               };
             }
         
-            /*
-                    # Static method to register custom provider types.  A custom provider is
-                    # an object with a toQuery method that takes a Query instance and
-                    # returns a compiled query for that provider.
-            */
         
+            /*
+             * Static method to register custom provider types.  A custom provider is
+             * an object with a toQuery method that takes a Query instance and
+             * returns a compiled query for that provider.
+             */
         
             Query.registerProvider = function(name, provider) {
               Query.Providers[name] = provider;
@@ -6102,18 +7181,18 @@
               };
             };
         
-            /*
-                    # Expose the registered providers via the Query.Providers namespace.
-            */
         
+            /*
+             * Expose the registered providers via the Query.Providers namespace.
+             */
         
             Query.Providers = {};
         
-            /*
-                    # Expose the query expressions and visitors externally via a
-                    # Query.Expressions namespace.
-            */
         
+            /*
+             * Expose the query expressions and visitors externally via a
+             * Query.Expressions namespace.
+             */
         
             Query.Expressions = Q;
         
@@ -6121,9 +7200,8 @@
         
           })();
         
-          /* Register the built in OData provider
-          */
         
+          /* Register the built in OData provider */
         
           ODataProvider = require('./ODataProvider').ODataProvider;
         
@@ -6133,24 +7211,22 @@
     };
 
     $__modules__.QueryNodes = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         
         /*
-        # Define a low level intermediate query expression language that we can
-        # translate other expressions languages (like JavaScript) into.
-        */
+         * Define a low level intermediate query expression language that we can
+         * translate other expressions languages (like JavaScript) into.
+         */
         
         
-        /* Get the base Node class.
-        */
-        
+        /* Get the base Node class. */
         
         (function() {
           var BinaryExpression, ConstantExpression, InvocationExpression, LiteralExpression, MemberExpression, Node, QueryExpression, QueryExpressionVisitor, UnaryExpression, Visitor, _ref,
@@ -6159,25 +7235,24 @@
         
           _ref = require('./Node'), Node = _ref.Node, Visitor = _ref.Visitor;
         
-          /*
-          # Provides the base class from which the classes that represent expression tree
-          # nodes are derived.
-          */
         
+          /*
+           * Provides the base class from which the classes that represent expression tree
+           * nodes are derived.
+           */
         
           exports.QueryExpression = QueryExpression = (function(_super) {
-        
             __extends(QueryExpression, _super);
         
             function QueryExpression() {
               QueryExpression.__super__.constructor.call(this);
             }
         
-            /*
-                    # Group a sequence of clauses together with a given operator (like And
-                    # or Or).
-            */
         
+            /*
+             * Group a sequence of clauses together with a given operator (like And
+             * or Or).
+             */
         
             QueryExpression.groupClauses = function(operator, clauses) {
               var combine;
@@ -6198,7 +7273,6 @@
           })(Node);
         
           exports.QueryExpressionVisitor = QueryExpressionVisitor = (function(_super) {
-        
             __extends(QueryExpressionVisitor, _super);
         
             function QueryExpressionVisitor() {
@@ -6213,19 +7287,18 @@
         
           })(Visitor);
         
-          /*
-          # Represents an expression that has a constant value.
-          */
         
+          /*
+           * Represents an expression that has a constant value.
+           */
         
           exports.ConstantExpression = ConstantExpression = (function(_super) {
-        
             __extends(ConstantExpression, _super);
         
-            /*
-                    # @value: The value of the constant expression.
-            */
         
+            /*
+             * @value: The value of the constant expression.
+             */
         
             function ConstantExpression(value) {
               this.value = value;
@@ -6240,19 +7313,18 @@
             return this.QueryExpression(node);
           };
         
-          /*
-          # Represents accessing a field.
-          */
         
+          /*
+           * Represents accessing a field.
+           */
         
           exports.MemberExpression = MemberExpression = (function(_super) {
-        
             __extends(MemberExpression, _super);
         
-            /*
-                    # @member: Gets the field to be accessed.
-            */
         
+            /*
+             * @member: Gets the field to be accessed.
+             */
         
             function MemberExpression(member) {
               this.member = member;
@@ -6267,21 +7339,20 @@
             return this.QueryExpression(node);
           };
         
-          /*
-          # Represents an expression that has a binary operator.
-          */
         
+          /*
+           * Represents an expression that has a binary operator.
+           */
         
           exports.BinaryExpression = BinaryExpression = (function(_super) {
-        
             __extends(BinaryExpression, _super);
         
-            /*
-                    # @operator: The operator of the binary expression.
-                    # @left: The left operand of the binary operation.
-                    # @right: The right operand of the binary operation.
-            */
         
+            /*
+             * @operator: The operator of the binary expression.
+             * @left: The left operand of the binary operation.
+             * @right: The right operand of the binary operation.
+             */
         
             function BinaryExpression(operator, left, right) {
               this.operator = operator;
@@ -6301,10 +7372,10 @@
             return node;
           };
         
-          /*
-          # Represents the known binary operators.
-          */
         
+          /*
+           * Represents the known binary operators.
+           */
         
           exports.BinaryOperators = {
             And: 'And',
@@ -6322,20 +7393,19 @@
             Equal: 'Equal'
           };
         
-          /*
-          # Represents the known unary operators.
-          */
         
+          /*
+           * Represents the known unary operators.
+           */
         
           exports.UnaryExpression = UnaryExpression = (function(_super) {
-        
             __extends(UnaryExpression, _super);
         
-            /*
-                    # @operator: The operator of the unary expression.
-                    # @operand: The operand of the unary expression.
-            */
         
+            /*
+             * @operator: The operator of the unary expression.
+             * @operand: The operand of the unary expression.
+             */
         
             function UnaryExpression(operator, operand) {
               this.operator = operator;
@@ -6353,10 +7423,10 @@
             return node;
           };
         
-          /*
-          # Represents the known unary operators.
-          */
         
+          /*
+           * Represents the known unary operators.
+           */
         
           exports.UnaryOperators = {
             Not: 'Not',
@@ -6365,20 +7435,19 @@
             Decrement: 'Decrement'
           };
         
-          /*
-          # Represents a method invocation.
-          */
         
+          /*
+           * Represents a method invocation.
+           */
         
           exports.InvocationExpression = InvocationExpression = (function(_super) {
-        
             __extends(InvocationExpression, _super);
         
-            /*
-                    # @method: The name of the method to invoke.
-                    # @args: The arguments to the method.
-            */
         
+            /*
+             * @method: The name of the method to invoke.
+             * @args: The arguments to the method.
+             */
         
             function InvocationExpression(method, args) {
               this.method = method;
@@ -6396,10 +7465,10 @@
             return node;
           };
         
-          /*
-          # Represents the known unary operators.
-          */
         
+          /*
+           * Represents the known unary operators.
+           */
         
           exports.Methods = {
             Length: 'Length',
@@ -6418,20 +7487,19 @@
             Round: 'Round'
           };
         
-          /*
-          # Represents a literal string in the query language.
-          */
         
+          /*
+           * Represents a literal string in the query language.
+           */
         
           exports.LiteralExpression = LiteralExpression = (function(_super) {
-        
             __extends(LiteralExpression, _super);
         
-            /*
-                    # @queryString
-                    # @args
-            */
         
+            /*
+             * @queryString
+             * @args
+             */
         
             function LiteralExpression(queryString, args) {
               this.queryString = queryString;
@@ -6451,14 +7519,13 @@
     };
 
     $__modules__.Utilities = function (exports) {
-        // Generated by CoffeeScript 1.4.0
+        // Generated by CoffeeScript 1.7.1
         
         /*
-        # ----------------------------------------------------------------------------
-        # Copyright (c) Microsoft Corporation. All rights reserved.
-        # ----------------------------------------------------------------------------
-        */
-        
+         * ----------------------------------------------------------------------------
+         * Copyright (c) Microsoft Corporation. All rights reserved.
+         * ----------------------------------------------------------------------------
+         */
         
         (function() {
           var classOf,
@@ -6468,7 +7535,7 @@
             return Object.prototype.toString.call(obj).slice(8, -1).toLowerCase();
           };
         
-          if (!(Array.prototype.reduce != null)) {
+          if (Array.prototype.reduce == null) {
             Array.prototype.reduce = function() {
               var accumulator, array, arrayLength, currentIndex, currentValue, moreArgs;
               accumulator = arguments[0], moreArgs = 2 <= arguments.length ? __slice.call(arguments, 1) : [];
@@ -6476,7 +7543,7 @@
               arrayLength = array.length;
               currentIndex = 0;
               currentValue = void 0;
-              if (!(array != null)) {
+              if (array == null) {
                 throw new TypeError("Object is null or undefined");
               }
               if (typeof accumulator !== "function") {
@@ -6502,10 +7569,10 @@
             };
           }
         
-          if (!(Array.prototype.map != null)) {
+          if (Array.prototype.map == null) {
             Array.prototype.map = function(callback, thisArg) {
               var elem, index, inputArray, len, outputArray, _i, _len;
-              if (!(typeof this !== "undefined" && this !== null)) {
+              if (typeof this === "undefined" || this === null) {
                 throw new TypeError("this is null or not defined");
               }
               if (typeof callback !== "function") {
@@ -6525,7 +7592,7 @@
             };
           }
         
-          if (!(Array.isArray != null)) {
+          if (Array.isArray == null) {
             Array.isArray = function(vArg) {
               return Object.prototype.toString.call(vArg) === "[object Array]";
             };
@@ -6581,6 +7648,7 @@
         /*
           Copyright (C) 2013 Ariya Hidayat <ariya.hidayat@gmail.com>
           Copyright (C) 2013 Thaddee Tyl <thaddee.tyl@gmail.com>
+          Copyright (C) 2013 Mathias Bynens <mathias@qiwi.be>
           Copyright (C) 2012 Ariya Hidayat <ariya.hidayat@gmail.com>
           Copyright (C) 2012 Mathias Bynens <mathias@qiwi.be>
           Copyright (C) 2012 Joost-Wim Boekesteijn <joost-wim@boekesteijn.nl>
@@ -6612,12 +7680,12 @@
         
         /*jslint bitwise:true plusplus:true */
         /*global esprima:true, define:true, exports:true, window: true,
-        createLocationMarker: true,
+        throwErrorTolerant: true,
         throwError: true, generateStatement: true, peek: true,
         parseAssignmentExpression: true, parseBlock: true, parseExpression: true,
         parseFunctionDeclaration: true, parseFunctionExpression: true,
         parseFunctionSourceElements: true, parseVariableIdentifier: true,
-        parseLeftHandSideExpression: true,
+        parseLeftHandSideExpression: true, parseParams: true, validateParam: true,
         parseUnaryExpression: true,
         parseStatement: true, parseSourceElement: true */
         
@@ -6626,6 +7694,8 @@
         
             // Universal Module Definition (UMD) to support AMD, CommonJS/Node.js,
             // Rhino, and plain browser loading.
+        
+            /* istanbul ignore next */
             if (typeof define === 'function' && define.amd) {
                 define(['exports'], factory);
             } else if (typeof exports !== 'undefined') {
@@ -6640,17 +7710,16 @@
                 TokenName,
                 FnExprTokens,
                 Syntax,
+                PlaceHolders,
                 PropertyKind,
                 Messages,
                 Regex,
-                SyntaxTreeDelegate,
                 source,
                 strict,
                 index,
                 lineNumber,
                 lineStart,
                 length,
-                delegate,
                 lookahead,
                 state,
                 extra;
@@ -6692,6 +7761,7 @@
             Syntax = {
                 AssignmentExpression: 'AssignmentExpression',
                 ArrayExpression: 'ArrayExpression',
+                ArrowFunctionExpression: 'ArrowFunctionExpression',
                 BlockStatement: 'BlockStatement',
                 BinaryExpression: 'BinaryExpression',
                 BreakStatement: 'BreakStatement',
@@ -6730,6 +7800,12 @@
                 VariableDeclarator: 'VariableDeclarator',
                 WhileStatement: 'WhileStatement',
                 WithStatement: 'WithStatement'
+            };
+        
+            PlaceHolders = {
+                ArrowParameterPlaceHolder: {
+                    type: 'ArrowParameterPlaceHolder'
+                }
             };
         
             PropertyKind = {
@@ -6777,8 +7853,8 @@
         
             // See also tools/generate-unicode-regex.py.
             Regex = {
-                NonAsciiIdentifierStart: new RegExp('[\xaa\xb5\xba\xc0-\xd6\xd8-\xf6\xf8-\u02c1\u02c6-\u02d1\u02e0-\u02e4\u02ec\u02ee\u0370-\u0374\u0376\u0377\u037a-\u037d\u0386\u0388-\u038a\u038c\u038e-\u03a1\u03a3-\u03f5\u03f7-\u0481\u048a-\u0527\u0531-\u0556\u0559\u0561-\u0587\u05d0-\u05ea\u05f0-\u05f2\u0620-\u064a\u066e\u066f\u0671-\u06d3\u06d5\u06e5\u06e6\u06ee\u06ef\u06fa-\u06fc\u06ff\u0710\u0712-\u072f\u074d-\u07a5\u07b1\u07ca-\u07ea\u07f4\u07f5\u07fa\u0800-\u0815\u081a\u0824\u0828\u0840-\u0858\u08a0\u08a2-\u08ac\u0904-\u0939\u093d\u0950\u0958-\u0961\u0971-\u0977\u0979-\u097f\u0985-\u098c\u098f\u0990\u0993-\u09a8\u09aa-\u09b0\u09b2\u09b6-\u09b9\u09bd\u09ce\u09dc\u09dd\u09df-\u09e1\u09f0\u09f1\u0a05-\u0a0a\u0a0f\u0a10\u0a13-\u0a28\u0a2a-\u0a30\u0a32\u0a33\u0a35\u0a36\u0a38\u0a39\u0a59-\u0a5c\u0a5e\u0a72-\u0a74\u0a85-\u0a8d\u0a8f-\u0a91\u0a93-\u0aa8\u0aaa-\u0ab0\u0ab2\u0ab3\u0ab5-\u0ab9\u0abd\u0ad0\u0ae0\u0ae1\u0b05-\u0b0c\u0b0f\u0b10\u0b13-\u0b28\u0b2a-\u0b30\u0b32\u0b33\u0b35-\u0b39\u0b3d\u0b5c\u0b5d\u0b5f-\u0b61\u0b71\u0b83\u0b85-\u0b8a\u0b8e-\u0b90\u0b92-\u0b95\u0b99\u0b9a\u0b9c\u0b9e\u0b9f\u0ba3\u0ba4\u0ba8-\u0baa\u0bae-\u0bb9\u0bd0\u0c05-\u0c0c\u0c0e-\u0c10\u0c12-\u0c28\u0c2a-\u0c33\u0c35-\u0c39\u0c3d\u0c58\u0c59\u0c60\u0c61\u0c85-\u0c8c\u0c8e-\u0c90\u0c92-\u0ca8\u0caa-\u0cb3\u0cb5-\u0cb9\u0cbd\u0cde\u0ce0\u0ce1\u0cf1\u0cf2\u0d05-\u0d0c\u0d0e-\u0d10\u0d12-\u0d3a\u0d3d\u0d4e\u0d60\u0d61\u0d7a-\u0d7f\u0d85-\u0d96\u0d9a-\u0db1\u0db3-\u0dbb\u0dbd\u0dc0-\u0dc6\u0e01-\u0e30\u0e32\u0e33\u0e40-\u0e46\u0e81\u0e82\u0e84\u0e87\u0e88\u0e8a\u0e8d\u0e94-\u0e97\u0e99-\u0e9f\u0ea1-\u0ea3\u0ea5\u0ea7\u0eaa\u0eab\u0ead-\u0eb0\u0eb2\u0eb3\u0ebd\u0ec0-\u0ec4\u0ec6\u0edc-\u0edf\u0f00\u0f40-\u0f47\u0f49-\u0f6c\u0f88-\u0f8c\u1000-\u102a\u103f\u1050-\u1055\u105a-\u105d\u1061\u1065\u1066\u106e-\u1070\u1075-\u1081\u108e\u10a0-\u10c5\u10c7\u10cd\u10d0-\u10fa\u10fc-\u1248\u124a-\u124d\u1250-\u1256\u1258\u125a-\u125d\u1260-\u1288\u128a-\u128d\u1290-\u12b0\u12b2-\u12b5\u12b8-\u12be\u12c0\u12c2-\u12c5\u12c8-\u12d6\u12d8-\u1310\u1312-\u1315\u1318-\u135a\u1380-\u138f\u13a0-\u13f4\u1401-\u166c\u166f-\u167f\u1681-\u169a\u16a0-\u16ea\u16ee-\u16f0\u1700-\u170c\u170e-\u1711\u1720-\u1731\u1740-\u1751\u1760-\u176c\u176e-\u1770\u1780-\u17b3\u17d7\u17dc\u1820-\u1877\u1880-\u18a8\u18aa\u18b0-\u18f5\u1900-\u191c\u1950-\u196d\u1970-\u1974\u1980-\u19ab\u19c1-\u19c7\u1a00-\u1a16\u1a20-\u1a54\u1aa7\u1b05-\u1b33\u1b45-\u1b4b\u1b83-\u1ba0\u1bae\u1baf\u1bba-\u1be5\u1c00-\u1c23\u1c4d-\u1c4f\u1c5a-\u1c7d\u1ce9-\u1cec\u1cee-\u1cf1\u1cf5\u1cf6\u1d00-\u1dbf\u1e00-\u1f15\u1f18-\u1f1d\u1f20-\u1f45\u1f48-\u1f4d\u1f50-\u1f57\u1f59\u1f5b\u1f5d\u1f5f-\u1f7d\u1f80-\u1fb4\u1fb6-\u1fbc\u1fbe\u1fc2-\u1fc4\u1fc6-\u1fcc\u1fd0-\u1fd3\u1fd6-\u1fdb\u1fe0-\u1fec\u1ff2-\u1ff4\u1ff6-\u1ffc\u2071\u207f\u2090-\u209c\u2102\u2107\u210a-\u2113\u2115\u2119-\u211d\u2124\u2126\u2128\u212a-\u212d\u212f-\u2139\u213c-\u213f\u2145-\u2149\u214e\u2160-\u2188\u2c00-\u2c2e\u2c30-\u2c5e\u2c60-\u2ce4\u2ceb-\u2cee\u2cf2\u2cf3\u2d00-\u2d25\u2d27\u2d2d\u2d30-\u2d67\u2d6f\u2d80-\u2d96\u2da0-\u2da6\u2da8-\u2dae\u2db0-\u2db6\u2db8-\u2dbe\u2dc0-\u2dc6\u2dc8-\u2dce\u2dd0-\u2dd6\u2dd8-\u2dde\u2e2f\u3005-\u3007\u3021-\u3029\u3031-\u3035\u3038-\u303c\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fc-\u30ff\u3105-\u312d\u3131-\u318e\u31a0-\u31ba\u31f0-\u31ff\u3400-\u4db5\u4e00-\u9fcc\ua000-\ua48c\ua4d0-\ua4fd\ua500-\ua60c\ua610-\ua61f\ua62a\ua62b\ua640-\ua66e\ua67f-\ua697\ua6a0-\ua6ef\ua717-\ua71f\ua722-\ua788\ua78b-\ua78e\ua790-\ua793\ua7a0-\ua7aa\ua7f8-\ua801\ua803-\ua805\ua807-\ua80a\ua80c-\ua822\ua840-\ua873\ua882-\ua8b3\ua8f2-\ua8f7\ua8fb\ua90a-\ua925\ua930-\ua946\ua960-\ua97c\ua984-\ua9b2\ua9cf\uaa00-\uaa28\uaa40-\uaa42\uaa44-\uaa4b\uaa60-\uaa76\uaa7a\uaa80-\uaaaf\uaab1\uaab5\uaab6\uaab9-\uaabd\uaac0\uaac2\uaadb-\uaadd\uaae0-\uaaea\uaaf2-\uaaf4\uab01-\uab06\uab09-\uab0e\uab11-\uab16\uab20-\uab26\uab28-\uab2e\uabc0-\uabe2\uac00-\ud7a3\ud7b0-\ud7c6\ud7cb-\ud7fb\uf900-\ufa6d\ufa70-\ufad9\ufb00-\ufb06\ufb13-\ufb17\ufb1d\ufb1f-\ufb28\ufb2a-\ufb36\ufb38-\ufb3c\ufb3e\ufb40\ufb41\ufb43\ufb44\ufb46-\ufbb1\ufbd3-\ufd3d\ufd50-\ufd8f\ufd92-\ufdc7\ufdf0-\ufdfb\ufe70-\ufe74\ufe76-\ufefc\uff21-\uff3a\uff41-\uff5a\uff66-\uffbe\uffc2-\uffc7\uffca-\uffcf\uffd2-\uffd7\uffda-\uffdc]'),
-                NonAsciiIdentifierPart: new RegExp('[\xaa\xb5\xba\xc0-\xd6\xd8-\xf6\xf8-\u02c1\u02c6-\u02d1\u02e0-\u02e4\u02ec\u02ee\u0300-\u0374\u0376\u0377\u037a-\u037d\u0386\u0388-\u038a\u038c\u038e-\u03a1\u03a3-\u03f5\u03f7-\u0481\u0483-\u0487\u048a-\u0527\u0531-\u0556\u0559\u0561-\u0587\u0591-\u05bd\u05bf\u05c1\u05c2\u05c4\u05c5\u05c7\u05d0-\u05ea\u05f0-\u05f2\u0610-\u061a\u0620-\u0669\u066e-\u06d3\u06d5-\u06dc\u06df-\u06e8\u06ea-\u06fc\u06ff\u0710-\u074a\u074d-\u07b1\u07c0-\u07f5\u07fa\u0800-\u082d\u0840-\u085b\u08a0\u08a2-\u08ac\u08e4-\u08fe\u0900-\u0963\u0966-\u096f\u0971-\u0977\u0979-\u097f\u0981-\u0983\u0985-\u098c\u098f\u0990\u0993-\u09a8\u09aa-\u09b0\u09b2\u09b6-\u09b9\u09bc-\u09c4\u09c7\u09c8\u09cb-\u09ce\u09d7\u09dc\u09dd\u09df-\u09e3\u09e6-\u09f1\u0a01-\u0a03\u0a05-\u0a0a\u0a0f\u0a10\u0a13-\u0a28\u0a2a-\u0a30\u0a32\u0a33\u0a35\u0a36\u0a38\u0a39\u0a3c\u0a3e-\u0a42\u0a47\u0a48\u0a4b-\u0a4d\u0a51\u0a59-\u0a5c\u0a5e\u0a66-\u0a75\u0a81-\u0a83\u0a85-\u0a8d\u0a8f-\u0a91\u0a93-\u0aa8\u0aaa-\u0ab0\u0ab2\u0ab3\u0ab5-\u0ab9\u0abc-\u0ac5\u0ac7-\u0ac9\u0acb-\u0acd\u0ad0\u0ae0-\u0ae3\u0ae6-\u0aef\u0b01-\u0b03\u0b05-\u0b0c\u0b0f\u0b10\u0b13-\u0b28\u0b2a-\u0b30\u0b32\u0b33\u0b35-\u0b39\u0b3c-\u0b44\u0b47\u0b48\u0b4b-\u0b4d\u0b56\u0b57\u0b5c\u0b5d\u0b5f-\u0b63\u0b66-\u0b6f\u0b71\u0b82\u0b83\u0b85-\u0b8a\u0b8e-\u0b90\u0b92-\u0b95\u0b99\u0b9a\u0b9c\u0b9e\u0b9f\u0ba3\u0ba4\u0ba8-\u0baa\u0bae-\u0bb9\u0bbe-\u0bc2\u0bc6-\u0bc8\u0bca-\u0bcd\u0bd0\u0bd7\u0be6-\u0bef\u0c01-\u0c03\u0c05-\u0c0c\u0c0e-\u0c10\u0c12-\u0c28\u0c2a-\u0c33\u0c35-\u0c39\u0c3d-\u0c44\u0c46-\u0c48\u0c4a-\u0c4d\u0c55\u0c56\u0c58\u0c59\u0c60-\u0c63\u0c66-\u0c6f\u0c82\u0c83\u0c85-\u0c8c\u0c8e-\u0c90\u0c92-\u0ca8\u0caa-\u0cb3\u0cb5-\u0cb9\u0cbc-\u0cc4\u0cc6-\u0cc8\u0cca-\u0ccd\u0cd5\u0cd6\u0cde\u0ce0-\u0ce3\u0ce6-\u0cef\u0cf1\u0cf2\u0d02\u0d03\u0d05-\u0d0c\u0d0e-\u0d10\u0d12-\u0d3a\u0d3d-\u0d44\u0d46-\u0d48\u0d4a-\u0d4e\u0d57\u0d60-\u0d63\u0d66-\u0d6f\u0d7a-\u0d7f\u0d82\u0d83\u0d85-\u0d96\u0d9a-\u0db1\u0db3-\u0dbb\u0dbd\u0dc0-\u0dc6\u0dca\u0dcf-\u0dd4\u0dd6\u0dd8-\u0ddf\u0df2\u0df3\u0e01-\u0e3a\u0e40-\u0e4e\u0e50-\u0e59\u0e81\u0e82\u0e84\u0e87\u0e88\u0e8a\u0e8d\u0e94-\u0e97\u0e99-\u0e9f\u0ea1-\u0ea3\u0ea5\u0ea7\u0eaa\u0eab\u0ead-\u0eb9\u0ebb-\u0ebd\u0ec0-\u0ec4\u0ec6\u0ec8-\u0ecd\u0ed0-\u0ed9\u0edc-\u0edf\u0f00\u0f18\u0f19\u0f20-\u0f29\u0f35\u0f37\u0f39\u0f3e-\u0f47\u0f49-\u0f6c\u0f71-\u0f84\u0f86-\u0f97\u0f99-\u0fbc\u0fc6\u1000-\u1049\u1050-\u109d\u10a0-\u10c5\u10c7\u10cd\u10d0-\u10fa\u10fc-\u1248\u124a-\u124d\u1250-\u1256\u1258\u125a-\u125d\u1260-\u1288\u128a-\u128d\u1290-\u12b0\u12b2-\u12b5\u12b8-\u12be\u12c0\u12c2-\u12c5\u12c8-\u12d6\u12d8-\u1310\u1312-\u1315\u1318-\u135a\u135d-\u135f\u1380-\u138f\u13a0-\u13f4\u1401-\u166c\u166f-\u167f\u1681-\u169a\u16a0-\u16ea\u16ee-\u16f0\u1700-\u170c\u170e-\u1714\u1720-\u1734\u1740-\u1753\u1760-\u176c\u176e-\u1770\u1772\u1773\u1780-\u17d3\u17d7\u17dc\u17dd\u17e0-\u17e9\u180b-\u180d\u1810-\u1819\u1820-\u1877\u1880-\u18aa\u18b0-\u18f5\u1900-\u191c\u1920-\u192b\u1930-\u193b\u1946-\u196d\u1970-\u1974\u1980-\u19ab\u19b0-\u19c9\u19d0-\u19d9\u1a00-\u1a1b\u1a20-\u1a5e\u1a60-\u1a7c\u1a7f-\u1a89\u1a90-\u1a99\u1aa7\u1b00-\u1b4b\u1b50-\u1b59\u1b6b-\u1b73\u1b80-\u1bf3\u1c00-\u1c37\u1c40-\u1c49\u1c4d-\u1c7d\u1cd0-\u1cd2\u1cd4-\u1cf6\u1d00-\u1de6\u1dfc-\u1f15\u1f18-\u1f1d\u1f20-\u1f45\u1f48-\u1f4d\u1f50-\u1f57\u1f59\u1f5b\u1f5d\u1f5f-\u1f7d\u1f80-\u1fb4\u1fb6-\u1fbc\u1fbe\u1fc2-\u1fc4\u1fc6-\u1fcc\u1fd0-\u1fd3\u1fd6-\u1fdb\u1fe0-\u1fec\u1ff2-\u1ff4\u1ff6-\u1ffc\u200c\u200d\u203f\u2040\u2054\u2071\u207f\u2090-\u209c\u20d0-\u20dc\u20e1\u20e5-\u20f0\u2102\u2107\u210a-\u2113\u2115\u2119-\u211d\u2124\u2126\u2128\u212a-\u212d\u212f-\u2139\u213c-\u213f\u2145-\u2149\u214e\u2160-\u2188\u2c00-\u2c2e\u2c30-\u2c5e\u2c60-\u2ce4\u2ceb-\u2cf3\u2d00-\u2d25\u2d27\u2d2d\u2d30-\u2d67\u2d6f\u2d7f-\u2d96\u2da0-\u2da6\u2da8-\u2dae\u2db0-\u2db6\u2db8-\u2dbe\u2dc0-\u2dc6\u2dc8-\u2dce\u2dd0-\u2dd6\u2dd8-\u2dde\u2de0-\u2dff\u2e2f\u3005-\u3007\u3021-\u302f\u3031-\u3035\u3038-\u303c\u3041-\u3096\u3099\u309a\u309d-\u309f\u30a1-\u30fa\u30fc-\u30ff\u3105-\u312d\u3131-\u318e\u31a0-\u31ba\u31f0-\u31ff\u3400-\u4db5\u4e00-\u9fcc\ua000-\ua48c\ua4d0-\ua4fd\ua500-\ua60c\ua610-\ua62b\ua640-\ua66f\ua674-\ua67d\ua67f-\ua697\ua69f-\ua6f1\ua717-\ua71f\ua722-\ua788\ua78b-\ua78e\ua790-\ua793\ua7a0-\ua7aa\ua7f8-\ua827\ua840-\ua873\ua880-\ua8c4\ua8d0-\ua8d9\ua8e0-\ua8f7\ua8fb\ua900-\ua92d\ua930-\ua953\ua960-\ua97c\ua980-\ua9c0\ua9cf-\ua9d9\uaa00-\uaa36\uaa40-\uaa4d\uaa50-\uaa59\uaa60-\uaa76\uaa7a\uaa7b\uaa80-\uaac2\uaadb-\uaadd\uaae0-\uaaef\uaaf2-\uaaf6\uab01-\uab06\uab09-\uab0e\uab11-\uab16\uab20-\uab26\uab28-\uab2e\uabc0-\uabea\uabec\uabed\uabf0-\uabf9\uac00-\ud7a3\ud7b0-\ud7c6\ud7cb-\ud7fb\uf900-\ufa6d\ufa70-\ufad9\ufb00-\ufb06\ufb13-\ufb17\ufb1d-\ufb28\ufb2a-\ufb36\ufb38-\ufb3c\ufb3e\ufb40\ufb41\ufb43\ufb44\ufb46-\ufbb1\ufbd3-\ufd3d\ufd50-\ufd8f\ufd92-\ufdc7\ufdf0-\ufdfb\ufe00-\ufe0f\ufe20-\ufe26\ufe33\ufe34\ufe4d-\ufe4f\ufe70-\ufe74\ufe76-\ufefc\uff10-\uff19\uff21-\uff3a\uff3f\uff41-\uff5a\uff66-\uffbe\uffc2-\uffc7\uffca-\uffcf\uffd2-\uffd7\uffda-\uffdc]')
+                NonAsciiIdentifierStart: new RegExp('[\xAA\xB5\xBA\xC0-\xD6\xD8-\xF6\xF8-\u02C1\u02C6-\u02D1\u02E0-\u02E4\u02EC\u02EE\u0370-\u0374\u0376\u0377\u037A-\u037D\u037F\u0386\u0388-\u038A\u038C\u038E-\u03A1\u03A3-\u03F5\u03F7-\u0481\u048A-\u052F\u0531-\u0556\u0559\u0561-\u0587\u05D0-\u05EA\u05F0-\u05F2\u0620-\u064A\u066E\u066F\u0671-\u06D3\u06D5\u06E5\u06E6\u06EE\u06EF\u06FA-\u06FC\u06FF\u0710\u0712-\u072F\u074D-\u07A5\u07B1\u07CA-\u07EA\u07F4\u07F5\u07FA\u0800-\u0815\u081A\u0824\u0828\u0840-\u0858\u08A0-\u08B2\u0904-\u0939\u093D\u0950\u0958-\u0961\u0971-\u0980\u0985-\u098C\u098F\u0990\u0993-\u09A8\u09AA-\u09B0\u09B2\u09B6-\u09B9\u09BD\u09CE\u09DC\u09DD\u09DF-\u09E1\u09F0\u09F1\u0A05-\u0A0A\u0A0F\u0A10\u0A13-\u0A28\u0A2A-\u0A30\u0A32\u0A33\u0A35\u0A36\u0A38\u0A39\u0A59-\u0A5C\u0A5E\u0A72-\u0A74\u0A85-\u0A8D\u0A8F-\u0A91\u0A93-\u0AA8\u0AAA-\u0AB0\u0AB2\u0AB3\u0AB5-\u0AB9\u0ABD\u0AD0\u0AE0\u0AE1\u0B05-\u0B0C\u0B0F\u0B10\u0B13-\u0B28\u0B2A-\u0B30\u0B32\u0B33\u0B35-\u0B39\u0B3D\u0B5C\u0B5D\u0B5F-\u0B61\u0B71\u0B83\u0B85-\u0B8A\u0B8E-\u0B90\u0B92-\u0B95\u0B99\u0B9A\u0B9C\u0B9E\u0B9F\u0BA3\u0BA4\u0BA8-\u0BAA\u0BAE-\u0BB9\u0BD0\u0C05-\u0C0C\u0C0E-\u0C10\u0C12-\u0C28\u0C2A-\u0C39\u0C3D\u0C58\u0C59\u0C60\u0C61\u0C85-\u0C8C\u0C8E-\u0C90\u0C92-\u0CA8\u0CAA-\u0CB3\u0CB5-\u0CB9\u0CBD\u0CDE\u0CE0\u0CE1\u0CF1\u0CF2\u0D05-\u0D0C\u0D0E-\u0D10\u0D12-\u0D3A\u0D3D\u0D4E\u0D60\u0D61\u0D7A-\u0D7F\u0D85-\u0D96\u0D9A-\u0DB1\u0DB3-\u0DBB\u0DBD\u0DC0-\u0DC6\u0E01-\u0E30\u0E32\u0E33\u0E40-\u0E46\u0E81\u0E82\u0E84\u0E87\u0E88\u0E8A\u0E8D\u0E94-\u0E97\u0E99-\u0E9F\u0EA1-\u0EA3\u0EA5\u0EA7\u0EAA\u0EAB\u0EAD-\u0EB0\u0EB2\u0EB3\u0EBD\u0EC0-\u0EC4\u0EC6\u0EDC-\u0EDF\u0F00\u0F40-\u0F47\u0F49-\u0F6C\u0F88-\u0F8C\u1000-\u102A\u103F\u1050-\u1055\u105A-\u105D\u1061\u1065\u1066\u106E-\u1070\u1075-\u1081\u108E\u10A0-\u10C5\u10C7\u10CD\u10D0-\u10FA\u10FC-\u1248\u124A-\u124D\u1250-\u1256\u1258\u125A-\u125D\u1260-\u1288\u128A-\u128D\u1290-\u12B0\u12B2-\u12B5\u12B8-\u12BE\u12C0\u12C2-\u12C5\u12C8-\u12D6\u12D8-\u1310\u1312-\u1315\u1318-\u135A\u1380-\u138F\u13A0-\u13F4\u1401-\u166C\u166F-\u167F\u1681-\u169A\u16A0-\u16EA\u16EE-\u16F8\u1700-\u170C\u170E-\u1711\u1720-\u1731\u1740-\u1751\u1760-\u176C\u176E-\u1770\u1780-\u17B3\u17D7\u17DC\u1820-\u1877\u1880-\u18A8\u18AA\u18B0-\u18F5\u1900-\u191E\u1950-\u196D\u1970-\u1974\u1980-\u19AB\u19C1-\u19C7\u1A00-\u1A16\u1A20-\u1A54\u1AA7\u1B05-\u1B33\u1B45-\u1B4B\u1B83-\u1BA0\u1BAE\u1BAF\u1BBA-\u1BE5\u1C00-\u1C23\u1C4D-\u1C4F\u1C5A-\u1C7D\u1CE9-\u1CEC\u1CEE-\u1CF1\u1CF5\u1CF6\u1D00-\u1DBF\u1E00-\u1F15\u1F18-\u1F1D\u1F20-\u1F45\u1F48-\u1F4D\u1F50-\u1F57\u1F59\u1F5B\u1F5D\u1F5F-\u1F7D\u1F80-\u1FB4\u1FB6-\u1FBC\u1FBE\u1FC2-\u1FC4\u1FC6-\u1FCC\u1FD0-\u1FD3\u1FD6-\u1FDB\u1FE0-\u1FEC\u1FF2-\u1FF4\u1FF6-\u1FFC\u2071\u207F\u2090-\u209C\u2102\u2107\u210A-\u2113\u2115\u2119-\u211D\u2124\u2126\u2128\u212A-\u212D\u212F-\u2139\u213C-\u213F\u2145-\u2149\u214E\u2160-\u2188\u2C00-\u2C2E\u2C30-\u2C5E\u2C60-\u2CE4\u2CEB-\u2CEE\u2CF2\u2CF3\u2D00-\u2D25\u2D27\u2D2D\u2D30-\u2D67\u2D6F\u2D80-\u2D96\u2DA0-\u2DA6\u2DA8-\u2DAE\u2DB0-\u2DB6\u2DB8-\u2DBE\u2DC0-\u2DC6\u2DC8-\u2DCE\u2DD0-\u2DD6\u2DD8-\u2DDE\u2E2F\u3005-\u3007\u3021-\u3029\u3031-\u3035\u3038-\u303C\u3041-\u3096\u309D-\u309F\u30A1-\u30FA\u30FC-\u30FF\u3105-\u312D\u3131-\u318E\u31A0-\u31BA\u31F0-\u31FF\u3400-\u4DB5\u4E00-\u9FCC\uA000-\uA48C\uA4D0-\uA4FD\uA500-\uA60C\uA610-\uA61F\uA62A\uA62B\uA640-\uA66E\uA67F-\uA69D\uA6A0-\uA6EF\uA717-\uA71F\uA722-\uA788\uA78B-\uA78E\uA790-\uA7AD\uA7B0\uA7B1\uA7F7-\uA801\uA803-\uA805\uA807-\uA80A\uA80C-\uA822\uA840-\uA873\uA882-\uA8B3\uA8F2-\uA8F7\uA8FB\uA90A-\uA925\uA930-\uA946\uA960-\uA97C\uA984-\uA9B2\uA9CF\uA9E0-\uA9E4\uA9E6-\uA9EF\uA9FA-\uA9FE\uAA00-\uAA28\uAA40-\uAA42\uAA44-\uAA4B\uAA60-\uAA76\uAA7A\uAA7E-\uAAAF\uAAB1\uAAB5\uAAB6\uAAB9-\uAABD\uAAC0\uAAC2\uAADB-\uAADD\uAAE0-\uAAEA\uAAF2-\uAAF4\uAB01-\uAB06\uAB09-\uAB0E\uAB11-\uAB16\uAB20-\uAB26\uAB28-\uAB2E\uAB30-\uAB5A\uAB5C-\uAB5F\uAB64\uAB65\uABC0-\uABE2\uAC00-\uD7A3\uD7B0-\uD7C6\uD7CB-\uD7FB\uF900-\uFA6D\uFA70-\uFAD9\uFB00-\uFB06\uFB13-\uFB17\uFB1D\uFB1F-\uFB28\uFB2A-\uFB36\uFB38-\uFB3C\uFB3E\uFB40\uFB41\uFB43\uFB44\uFB46-\uFBB1\uFBD3-\uFD3D\uFD50-\uFD8F\uFD92-\uFDC7\uFDF0-\uFDFB\uFE70-\uFE74\uFE76-\uFEFC\uFF21-\uFF3A\uFF41-\uFF5A\uFF66-\uFFBE\uFFC2-\uFFC7\uFFCA-\uFFCF\uFFD2-\uFFD7\uFFDA-\uFFDC]'),
+                NonAsciiIdentifierPart: new RegExp('[\xAA\xB5\xBA\xC0-\xD6\xD8-\xF6\xF8-\u02C1\u02C6-\u02D1\u02E0-\u02E4\u02EC\u02EE\u0300-\u0374\u0376\u0377\u037A-\u037D\u037F\u0386\u0388-\u038A\u038C\u038E-\u03A1\u03A3-\u03F5\u03F7-\u0481\u0483-\u0487\u048A-\u052F\u0531-\u0556\u0559\u0561-\u0587\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7\u05D0-\u05EA\u05F0-\u05F2\u0610-\u061A\u0620-\u0669\u066E-\u06D3\u06D5-\u06DC\u06DF-\u06E8\u06EA-\u06FC\u06FF\u0710-\u074A\u074D-\u07B1\u07C0-\u07F5\u07FA\u0800-\u082D\u0840-\u085B\u08A0-\u08B2\u08E4-\u0963\u0966-\u096F\u0971-\u0983\u0985-\u098C\u098F\u0990\u0993-\u09A8\u09AA-\u09B0\u09B2\u09B6-\u09B9\u09BC-\u09C4\u09C7\u09C8\u09CB-\u09CE\u09D7\u09DC\u09DD\u09DF-\u09E3\u09E6-\u09F1\u0A01-\u0A03\u0A05-\u0A0A\u0A0F\u0A10\u0A13-\u0A28\u0A2A-\u0A30\u0A32\u0A33\u0A35\u0A36\u0A38\u0A39\u0A3C\u0A3E-\u0A42\u0A47\u0A48\u0A4B-\u0A4D\u0A51\u0A59-\u0A5C\u0A5E\u0A66-\u0A75\u0A81-\u0A83\u0A85-\u0A8D\u0A8F-\u0A91\u0A93-\u0AA8\u0AAA-\u0AB0\u0AB2\u0AB3\u0AB5-\u0AB9\u0ABC-\u0AC5\u0AC7-\u0AC9\u0ACB-\u0ACD\u0AD0\u0AE0-\u0AE3\u0AE6-\u0AEF\u0B01-\u0B03\u0B05-\u0B0C\u0B0F\u0B10\u0B13-\u0B28\u0B2A-\u0B30\u0B32\u0B33\u0B35-\u0B39\u0B3C-\u0B44\u0B47\u0B48\u0B4B-\u0B4D\u0B56\u0B57\u0B5C\u0B5D\u0B5F-\u0B63\u0B66-\u0B6F\u0B71\u0B82\u0B83\u0B85-\u0B8A\u0B8E-\u0B90\u0B92-\u0B95\u0B99\u0B9A\u0B9C\u0B9E\u0B9F\u0BA3\u0BA4\u0BA8-\u0BAA\u0BAE-\u0BB9\u0BBE-\u0BC2\u0BC6-\u0BC8\u0BCA-\u0BCD\u0BD0\u0BD7\u0BE6-\u0BEF\u0C00-\u0C03\u0C05-\u0C0C\u0C0E-\u0C10\u0C12-\u0C28\u0C2A-\u0C39\u0C3D-\u0C44\u0C46-\u0C48\u0C4A-\u0C4D\u0C55\u0C56\u0C58\u0C59\u0C60-\u0C63\u0C66-\u0C6F\u0C81-\u0C83\u0C85-\u0C8C\u0C8E-\u0C90\u0C92-\u0CA8\u0CAA-\u0CB3\u0CB5-\u0CB9\u0CBC-\u0CC4\u0CC6-\u0CC8\u0CCA-\u0CCD\u0CD5\u0CD6\u0CDE\u0CE0-\u0CE3\u0CE6-\u0CEF\u0CF1\u0CF2\u0D01-\u0D03\u0D05-\u0D0C\u0D0E-\u0D10\u0D12-\u0D3A\u0D3D-\u0D44\u0D46-\u0D48\u0D4A-\u0D4E\u0D57\u0D60-\u0D63\u0D66-\u0D6F\u0D7A-\u0D7F\u0D82\u0D83\u0D85-\u0D96\u0D9A-\u0DB1\u0DB3-\u0DBB\u0DBD\u0DC0-\u0DC6\u0DCA\u0DCF-\u0DD4\u0DD6\u0DD8-\u0DDF\u0DE6-\u0DEF\u0DF2\u0DF3\u0E01-\u0E3A\u0E40-\u0E4E\u0E50-\u0E59\u0E81\u0E82\u0E84\u0E87\u0E88\u0E8A\u0E8D\u0E94-\u0E97\u0E99-\u0E9F\u0EA1-\u0EA3\u0EA5\u0EA7\u0EAA\u0EAB\u0EAD-\u0EB9\u0EBB-\u0EBD\u0EC0-\u0EC4\u0EC6\u0EC8-\u0ECD\u0ED0-\u0ED9\u0EDC-\u0EDF\u0F00\u0F18\u0F19\u0F20-\u0F29\u0F35\u0F37\u0F39\u0F3E-\u0F47\u0F49-\u0F6C\u0F71-\u0F84\u0F86-\u0F97\u0F99-\u0FBC\u0FC6\u1000-\u1049\u1050-\u109D\u10A0-\u10C5\u10C7\u10CD\u10D0-\u10FA\u10FC-\u1248\u124A-\u124D\u1250-\u1256\u1258\u125A-\u125D\u1260-\u1288\u128A-\u128D\u1290-\u12B0\u12B2-\u12B5\u12B8-\u12BE\u12C0\u12C2-\u12C5\u12C8-\u12D6\u12D8-\u1310\u1312-\u1315\u1318-\u135A\u135D-\u135F\u1380-\u138F\u13A0-\u13F4\u1401-\u166C\u166F-\u167F\u1681-\u169A\u16A0-\u16EA\u16EE-\u16F8\u1700-\u170C\u170E-\u1714\u1720-\u1734\u1740-\u1753\u1760-\u176C\u176E-\u1770\u1772\u1773\u1780-\u17D3\u17D7\u17DC\u17DD\u17E0-\u17E9\u180B-\u180D\u1810-\u1819\u1820-\u1877\u1880-\u18AA\u18B0-\u18F5\u1900-\u191E\u1920-\u192B\u1930-\u193B\u1946-\u196D\u1970-\u1974\u1980-\u19AB\u19B0-\u19C9\u19D0-\u19D9\u1A00-\u1A1B\u1A20-\u1A5E\u1A60-\u1A7C\u1A7F-\u1A89\u1A90-\u1A99\u1AA7\u1AB0-\u1ABD\u1B00-\u1B4B\u1B50-\u1B59\u1B6B-\u1B73\u1B80-\u1BF3\u1C00-\u1C37\u1C40-\u1C49\u1C4D-\u1C7D\u1CD0-\u1CD2\u1CD4-\u1CF6\u1CF8\u1CF9\u1D00-\u1DF5\u1DFC-\u1F15\u1F18-\u1F1D\u1F20-\u1F45\u1F48-\u1F4D\u1F50-\u1F57\u1F59\u1F5B\u1F5D\u1F5F-\u1F7D\u1F80-\u1FB4\u1FB6-\u1FBC\u1FBE\u1FC2-\u1FC4\u1FC6-\u1FCC\u1FD0-\u1FD3\u1FD6-\u1FDB\u1FE0-\u1FEC\u1FF2-\u1FF4\u1FF6-\u1FFC\u200C\u200D\u203F\u2040\u2054\u2071\u207F\u2090-\u209C\u20D0-\u20DC\u20E1\u20E5-\u20F0\u2102\u2107\u210A-\u2113\u2115\u2119-\u211D\u2124\u2126\u2128\u212A-\u212D\u212F-\u2139\u213C-\u213F\u2145-\u2149\u214E\u2160-\u2188\u2C00-\u2C2E\u2C30-\u2C5E\u2C60-\u2CE4\u2CEB-\u2CF3\u2D00-\u2D25\u2D27\u2D2D\u2D30-\u2D67\u2D6F\u2D7F-\u2D96\u2DA0-\u2DA6\u2DA8-\u2DAE\u2DB0-\u2DB6\u2DB8-\u2DBE\u2DC0-\u2DC6\u2DC8-\u2DCE\u2DD0-\u2DD6\u2DD8-\u2DDE\u2DE0-\u2DFF\u2E2F\u3005-\u3007\u3021-\u302F\u3031-\u3035\u3038-\u303C\u3041-\u3096\u3099\u309A\u309D-\u309F\u30A1-\u30FA\u30FC-\u30FF\u3105-\u312D\u3131-\u318E\u31A0-\u31BA\u31F0-\u31FF\u3400-\u4DB5\u4E00-\u9FCC\uA000-\uA48C\uA4D0-\uA4FD\uA500-\uA60C\uA610-\uA62B\uA640-\uA66F\uA674-\uA67D\uA67F-\uA69D\uA69F-\uA6F1\uA717-\uA71F\uA722-\uA788\uA78B-\uA78E\uA790-\uA7AD\uA7B0\uA7B1\uA7F7-\uA827\uA840-\uA873\uA880-\uA8C4\uA8D0-\uA8D9\uA8E0-\uA8F7\uA8FB\uA900-\uA92D\uA930-\uA953\uA960-\uA97C\uA980-\uA9C0\uA9CF-\uA9D9\uA9E0-\uA9FE\uAA00-\uAA36\uAA40-\uAA4D\uAA50-\uAA59\uAA60-\uAA76\uAA7A-\uAAC2\uAADB-\uAADD\uAAE0-\uAAEF\uAAF2-\uAAF6\uAB01-\uAB06\uAB09-\uAB0E\uAB11-\uAB16\uAB20-\uAB26\uAB28-\uAB2E\uAB30-\uAB5A\uAB5C-\uAB5F\uAB64\uAB65\uABC0-\uABEA\uABEC\uABED\uABF0-\uABF9\uAC00-\uD7A3\uD7B0-\uD7C6\uD7CB-\uD7FB\uF900-\uFA6D\uFA70-\uFAD9\uFB00-\uFB06\uFB13-\uFB17\uFB1D-\uFB28\uFB2A-\uFB36\uFB38-\uFB3C\uFB3E\uFB40\uFB41\uFB43\uFB44\uFB46-\uFBB1\uFBD3-\uFD3D\uFD50-\uFD8F\uFD92-\uFDC7\uFDF0-\uFDFB\uFE00-\uFE0F\uFE20-\uFE2D\uFE33\uFE34\uFE4D-\uFE4F\uFE70-\uFE74\uFE76-\uFEFC\uFF10-\uFF19\uFF21-\uFF3A\uFF3F\uFF41-\uFF5A\uFF66-\uFFBE\uFFC2-\uFFC7\uFFCA-\uFFCF\uFFD2-\uFFD7\uFFDA-\uFFDC]')
             };
         
             // Ensure the condition is true, otherwise throw an error.
@@ -6787,13 +7863,14 @@
             // Do NOT use this to enforce a certain condition on any user input.
         
             function assert(condition, message) {
+                /* istanbul ignore if */
                 if (!condition) {
                     throw new Error('ASSERT: ' + message);
                 }
             }
         
             function isDecimalDigit(ch) {
-                return (ch >= 48 && ch <= 57);   // 0..9
+                return (ch >= 0x30 && ch <= 0x39);   // 0..9
             }
         
             function isHexDigit(ch) {
@@ -6808,36 +7885,32 @@
             // 7.2 White Space
         
             function isWhiteSpace(ch) {
-                return (ch === 32) ||  // space
-                    (ch === 9) ||      // tab
-                    (ch === 0xB) ||
-                    (ch === 0xC) ||
-                    (ch === 0xA0) ||
-                    (ch >= 0x1680 && '\u1680\u180E\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u202F\u205F\u3000\uFEFF'.indexOf(String.fromCharCode(ch)) > 0);
+                return (ch === 0x20) || (ch === 0x09) || (ch === 0x0B) || (ch === 0x0C) || (ch === 0xA0) ||
+                    (ch >= 0x1680 && [0x1680, 0x180E, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000, 0xFEFF].indexOf(ch) >= 0);
             }
         
             // 7.3 Line Terminators
         
             function isLineTerminator(ch) {
-                return (ch === 10) || (ch === 13) || (ch === 0x2028) || (ch === 0x2029);
+                return (ch === 0x0A) || (ch === 0x0D) || (ch === 0x2028) || (ch === 0x2029);
             }
         
             // 7.6 Identifier Names and Identifiers
         
             function isIdentifierStart(ch) {
-                return (ch === 36) || (ch === 95) ||  // $ (dollar) and _ (underscore)
-                    (ch >= 65 && ch <= 90) ||         // A..Z
-                    (ch >= 97 && ch <= 122) ||        // a..z
-                    (ch === 92) ||                    // \ (backslash)
+                return (ch === 0x24) || (ch === 0x5F) ||  // $ (dollar) and _ (underscore)
+                    (ch >= 0x41 && ch <= 0x5A) ||         // A..Z
+                    (ch >= 0x61 && ch <= 0x7A) ||         // a..z
+                    (ch === 0x5C) ||                      // \ (backslash)
                     ((ch >= 0x80) && Regex.NonAsciiIdentifierStart.test(String.fromCharCode(ch)));
             }
         
             function isIdentifierPart(ch) {
-                return (ch === 36) || (ch === 95) ||  // $ (dollar) and _ (underscore)
-                    (ch >= 65 && ch <= 90) ||         // A..Z
-                    (ch >= 97 && ch <= 122) ||        // a..z
-                    (ch >= 48 && ch <= 57) ||         // 0..9
-                    (ch === 92) ||                    // \ (backslash)
+                return (ch === 0x24) || (ch === 0x5F) ||  // $ (dollar) and _ (underscore)
+                    (ch >= 0x41 && ch <= 0x5A) ||         // A..Z
+                    (ch >= 0x61 && ch <= 0x7A) ||         // a..z
+                    (ch >= 0x30 && ch <= 0x39) ||         // 0..9
+                    (ch === 0x5C) ||                      // \ (backslash)
                     ((ch >= 0x80) && Regex.NonAsciiIdentifierPart.test(String.fromCharCode(ch)));
             }
         
@@ -6943,16 +8016,20 @@
                     comment.loc = loc;
                 }
                 extra.comments.push(comment);
+                if (extra.attachComment) {
+                    extra.leadingComments.push(comment);
+                    extra.trailingComments.push(comment);
+                }
             }
         
-            function skipSingleLineComment() {
+            function skipSingleLineComment(offset) {
                 var start, loc, ch, comment;
         
-                start = index - 2;
+                start = index - offset;
                 loc = {
                     start: {
                         line: lineNumber,
-                        column: index - lineStart - 2
+                        column: index - lineStart - offset
                     }
                 };
         
@@ -6961,7 +8038,7 @@
                     ++index;
                     if (isLineTerminator(ch)) {
                         if (extra.comments) {
-                            comment = source.slice(start + 2, index - 1);
+                            comment = source.slice(start + offset, index - 1);
                             loc.end = {
                                 line: lineNumber,
                                 column: index - lineStart - 1
@@ -6978,7 +8055,7 @@
                 }
         
                 if (extra.comments) {
-                    comment = source.slice(start + 2, index);
+                    comment = source.slice(start + offset, index);
                     loc.end = {
                         line: lineNumber,
                         column: index - lineStart
@@ -7003,7 +8080,7 @@
                 while (index < length) {
                     ch = source.charCodeAt(index);
                     if (isLineTerminator(ch)) {
-                        if (ch === 13 && source.charCodeAt(index + 1) === 10) {
+                        if (ch === 0x0D && source.charCodeAt(index + 1) === 0x0A) {
                             ++index;
                         }
                         ++lineNumber;
@@ -7012,9 +8089,9 @@
                         if (index >= length) {
                             throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
                         }
-                    } else if (ch === 42) {
-                        // Block comment ends with '*/' (char #42, char #47).
-                        if (source.charCodeAt(index + 1) === 47) {
+                    } else if (ch === 0x2A) {
+                        // Block comment ends with '*/'.
+                        if (source.charCodeAt(index + 1) === 0x2F) {
                             ++index;
                             ++index;
                             if (extra.comments) {
@@ -7037,8 +8114,9 @@
             }
         
             function skipComment() {
-                var ch;
+                var ch, start;
         
+                start = (index === 0);
                 while (index < length) {
                     ch = source.charCodeAt(index);
         
@@ -7046,21 +8124,42 @@
                         ++index;
                     } else if (isLineTerminator(ch)) {
                         ++index;
-                        if (ch === 13 && source.charCodeAt(index) === 10) {
+                        if (ch === 0x0D && source.charCodeAt(index) === 0x0A) {
                             ++index;
                         }
                         ++lineNumber;
                         lineStart = index;
-                    } else if (ch === 47) { // 47 is '/'
+                        start = true;
+                    } else if (ch === 0x2F) { // U+002F is '/'
                         ch = source.charCodeAt(index + 1);
-                        if (ch === 47) {
+                        if (ch === 0x2F) {
                             ++index;
                             ++index;
-                            skipSingleLineComment();
-                        } else if (ch === 42) {  // 42 is '*'
+                            skipSingleLineComment(2);
+                            start = true;
+                        } else if (ch === 0x2A) {  // U+002A is '*'
                             ++index;
                             ++index;
                             skipMultiLineComment();
+                        } else {
+                            break;
+                        }
+                    } else if (start && ch === 0x2D) { // U+002D is '-'
+                        // U+003E is '>'
+                        if ((source.charCodeAt(index + 1) === 0x2D) && (source.charCodeAt(index + 2) === 0x3E)) {
+                            // '-->' is a single-line comment
+                            index += 3;
+                            skipSingleLineComment(3);
+                        } else {
+                            break;
+                        }
+                    } else if (ch === 0x3C) { // U+003C is '<'
+                        if (source.slice(index + 1, index + 4) === '!--') {
+                            ++index; // `<`
+                            ++index; // `!`
+                            ++index; // `-`
+                            ++index; // `-`
+                            skipSingleLineComment(4);
                         } else {
                             break;
                         }
@@ -7085,15 +8184,47 @@
                 return String.fromCharCode(code);
             }
         
+            function scanUnicodeCodePointEscape() {
+                var ch, code, cu1, cu2;
+        
+                ch = source[index];
+                code = 0;
+        
+                // At least, one hex digit is required.
+                if (ch === '}') {
+                    throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                }
+        
+                while (index < length) {
+                    ch = source[index++];
+                    if (!isHexDigit(ch)) {
+                        break;
+                    }
+                    code = code * 16 + '0123456789abcdef'.indexOf(ch.toLowerCase());
+                }
+        
+                if (code > 0x10FFFF || ch !== '}') {
+                    throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                }
+        
+                // UTF-16 Encoding
+                if (code <= 0xFFFF) {
+                    return String.fromCharCode(code);
+                }
+                cu1 = ((code - 0x10000) >> 10) + 0xD800;
+                cu2 = ((code - 0x10000) & 1023) + 0xDC00;
+                return String.fromCharCode(cu1, cu2);
+            }
+        
             function getEscapedIdentifier() {
                 var ch, id;
         
                 ch = source.charCodeAt(index++);
                 id = String.fromCharCode(ch);
         
-                // '\u' (char #92, char #117) denotes an escaped character.
-                if (ch === 92) {
-                    if (source.charCodeAt(index) !== 117) {
+                // '\u' (U+005C, U+0075) denotes an escaped character.
+                if (ch === 0x5C) {
+                    if (source.charCodeAt(index) !== 0x75) {
                         throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
                     }
                     ++index;
@@ -7112,10 +8243,10 @@
                     ++index;
                     id += String.fromCharCode(ch);
         
-                    // '\u' (char #92, char #117) denotes an escaped character.
-                    if (ch === 92) {
+                    // '\u' (U+005C, U+0075) denotes an escaped character.
+                    if (ch === 0x5C) {
                         id = id.substr(0, id.length - 1);
-                        if (source.charCodeAt(index) !== 117) {
+                        if (source.charCodeAt(index) !== 0x75) {
                             throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
                         }
                         ++index;
@@ -7136,8 +8267,8 @@
                 start = index++;
                 while (index < length) {
                     ch = source.charCodeAt(index);
-                    if (ch === 92) {
-                        // Blackslash (char #92) marks Unicode escape sequence.
+                    if (ch === 0x5C) {
+                        // Blackslash (U+005C) marks Unicode escape sequence.
                         index = start;
                         return getEscapedIdentifier();
                     }
@@ -7156,8 +8287,8 @@
         
                 start = index;
         
-                // Backslash (char #92) starts an escaped character.
-                id = (source.charCodeAt(index) === 92) ? getEscapedIdentifier() : getIdentifier();
+                // Backslash (U+005C) starts an escaped character.
+                id = (source.charCodeAt(index) === 0x5C) ? getEscapedIdentifier() : getIdentifier();
         
                 // There is no keyword or literal with only one character.
                 // Thus, it must be an identifier.
@@ -7178,7 +8309,8 @@
                     value: id,
                     lineNumber: lineNumber,
                     lineStart: lineStart,
-                    range: [start, index]
+                    start: start,
+                    end: index
                 };
             }
         
@@ -7197,23 +8329,23 @@
                 switch (code) {
         
                 // Check for most common single-character punctuators.
-                case 46:   // . dot
-                case 40:   // ( open bracket
-                case 41:   // ) close bracket
-                case 59:   // ; semicolon
-                case 44:   // , comma
-                case 123:  // { open curly brace
-                case 125:  // } close curly brace
-                case 91:   // [
-                case 93:   // ]
-                case 58:   // :
-                case 63:   // ?
-                case 126:  // ~
+                case 0x2E:  // . dot
+                case 0x28:  // ( open bracket
+                case 0x29:  // ) close bracket
+                case 0x3B:  // ; semicolon
+                case 0x2C:  // , comma
+                case 0x7B:  // { open curly brace
+                case 0x7D:  // } close curly brace
+                case 0x5B:  // [
+                case 0x5D:  // ]
+                case 0x3A:  // :
+                case 0x3F:  // ?
+                case 0x7E:  // ~
                     ++index;
                     if (extra.tokenize) {
-                        if (code === 40) {
+                        if (code === 0x28) {
                             extra.openParenToken = extra.tokens.length;
-                        } else if (code === 123) {
+                        } else if (code === 0x7B) {
                             extra.openCurlyToken = extra.tokens.length;
                         }
                     }
@@ -7222,40 +8354,42 @@
                         value: String.fromCharCode(code),
                         lineNumber: lineNumber,
                         lineStart: lineStart,
-                        range: [start, index]
+                        start: start,
+                        end: index
                     };
         
                 default:
                     code2 = source.charCodeAt(index + 1);
         
-                    // '=' (char #61) marks an assignment or comparison operator.
-                    if (code2 === 61) {
+                    // '=' (U+003D) marks an assignment or comparison operator.
+                    if (code2 === 0x3D) {
                         switch (code) {
-                        case 37:  // %
-                        case 38:  // &
-                        case 42:  // *:
-                        case 43:  // +
-                        case 45:  // -
-                        case 47:  // /
-                        case 60:  // <
-                        case 62:  // >
-                        case 94:  // ^
-                        case 124: // |
+                        case 0x2B:  // +
+                        case 0x2D:  // -
+                        case 0x2F:  // /
+                        case 0x3C:  // <
+                        case 0x3E:  // >
+                        case 0x5E:  // ^
+                        case 0x7C:  // |
+                        case 0x25:  // %
+                        case 0x26:  // &
+                        case 0x2A:  // *
                             index += 2;
                             return {
                                 type: Token.Punctuator,
                                 value: String.fromCharCode(code) + String.fromCharCode(code2),
                                 lineNumber: lineNumber,
                                 lineStart: lineStart,
-                                range: [start, index]
+                                start: start,
+                                end: index
                             };
         
-                        case 33: // !
-                        case 61: // =
+                        case 0x21: // !
+                        case 0x3D: // =
                             index += 2;
         
                             // !== and ===
-                            if (source.charCodeAt(index) === 61) {
+                            if (source.charCodeAt(index) === 0x3D) {
                                 ++index;
                             }
                             return {
@@ -7263,83 +8397,61 @@
                                 value: source.slice(start, index),
                                 lineNumber: lineNumber,
                                 lineStart: lineStart,
-                                range: [start, index]
+                                start: start,
+                                end: index
                             };
-                        default:
-                            break;
                         }
                     }
-                    break;
                 }
-        
-                // Peek more characters.
-        
-                ch2 = source[index + 1];
-                ch3 = source[index + 2];
-                ch4 = source[index + 3];
         
                 // 4-character punctuator: >>>=
         
-                if (ch1 === '>' && ch2 === '>' && ch3 === '>') {
-                    if (ch4 === '=') {
-                        index += 4;
-                        return {
-                            type: Token.Punctuator,
-                            value: '>>>=',
-                            lineNumber: lineNumber,
-                            lineStart: lineStart,
-                            range: [start, index]
-                        };
-                    }
+                ch4 = source.substr(index, 4);
+        
+                if (ch4 === '>>>=') {
+                    index += 4;
+                    return {
+                        type: Token.Punctuator,
+                        value: ch4,
+                        lineNumber: lineNumber,
+                        lineStart: lineStart,
+                        start: start,
+                        end: index
+                    };
                 }
         
                 // 3-character punctuators: === !== >>> <<= >>=
         
-                if (ch1 === '>' && ch2 === '>' && ch3 === '>') {
-                    index += 3;
-                    return {
-                        type: Token.Punctuator,
-                        value: '>>>',
-                        lineNumber: lineNumber,
-                        lineStart: lineStart,
-                        range: [start, index]
-                    };
-                }
+                ch3 = ch4.substr(0, 3);
         
-                if (ch1 === '<' && ch2 === '<' && ch3 === '=') {
+                if (ch3 === '>>>' || ch3 === '<<=' || ch3 === '>>=') {
                     index += 3;
                     return {
                         type: Token.Punctuator,
-                        value: '<<=',
+                        value: ch3,
                         lineNumber: lineNumber,
                         lineStart: lineStart,
-                        range: [start, index]
-                    };
-                }
-        
-                if (ch1 === '>' && ch2 === '>' && ch3 === '=') {
-                    index += 3;
-                    return {
-                        type: Token.Punctuator,
-                        value: '>>=',
-                        lineNumber: lineNumber,
-                        lineStart: lineStart,
-                        range: [start, index]
+                        start: start,
+                        end: index
                     };
                 }
         
                 // Other 2-character punctuators: ++ -- << >> && ||
+                ch2 = ch3.substr(0, 2);
         
-                if (ch1 === ch2 && ('+-<>&|'.indexOf(ch1) >= 0)) {
+                if ((ch1 === ch2[1] && ('+-<>&|'.indexOf(ch1) >= 0)) || ch2 === '=>') {
                     index += 2;
                     return {
                         type: Token.Punctuator,
-                        value: ch1 + ch2,
+                        value: ch2,
                         lineNumber: lineNumber,
                         lineStart: lineStart,
-                        range: [start, index]
+                        start: start,
+                        end: index
                     };
                 }
+        
+                // 1-character punctuators: < > = ! + - * % & | ^ /
         
                 if ('<>=!+-*%&|^/'.indexOf(ch1) >= 0) {
                     ++index;
@@ -7348,7 +8460,8 @@
                         value: ch1,
                         lineNumber: lineNumber,
                         lineStart: lineStart,
-                        range: [start, index]
+                        start: start,
+                        end: index
                     };
                 }
         
@@ -7380,7 +8493,8 @@
                     value: parseInt('0x' + number, 16),
                     lineNumber: lineNumber,
                     lineStart: lineStart,
-                    range: [start, index]
+                    start: start,
+                    end: index
                 };
             }
         
@@ -7403,7 +8517,8 @@
                     octal: true,
                     lineNumber: lineNumber,
                     lineStart: lineStart,
-                    range: [start, index]
+                    start: start,
+                    end: index
                 };
             }
         
@@ -7476,14 +8591,17 @@
                     value: parseFloat(number),
                     lineNumber: lineNumber,
                     lineStart: lineStart,
-                    range: [start, index]
+                    start: start,
+                    end: index
                 };
             }
         
             // 7.8.4 String Literals
         
             function scanStringLiteral() {
-                var str = '', quote, start, ch, code, unescaped, restore, octal = false;
+                var str = '', quote, start, ch, code, unescaped, restore, octal = false, startLineNumber, startLineStart;
+                startLineNumber = lineNumber;
+                startLineStart = lineStart;
         
                 quote = source[index];
                 assert((quote === '\'' || quote === '"'),
@@ -7502,6 +8620,22 @@
                         ch = source[index++];
                         if (!ch || !isLineTerminator(ch.charCodeAt(0))) {
                             switch (ch) {
+                            case 'u':
+                            case 'x':
+                                if (source[index] === '{') {
+                                    ++index;
+                                    str += scanUnicodeCodePointEscape();
+                                } else {
+                                    restore = index;
+                                    unescaped = scanHexEscape(ch);
+                                    if (unescaped) {
+                                        str += unescaped;
+                                    } else {
+                                        index = restore;
+                                        str += ch;
+                                    }
+                                }
+                                break;
                             case 'n':
                                 str += '\n';
                                 break;
@@ -7510,17 +8644,6 @@
                                 break;
                             case 't':
                                 str += '\t';
-                                break;
-                            case 'u':
-                            case 'x':
-                                restore = index;
-                                unescaped = scanHexEscape(ch);
-                                if (unescaped) {
-                                    str += unescaped;
-                                } else {
-                                    index = restore;
-                                    str += ch;
-                                }
                                 break;
                             case 'b':
                                 str += '\b';
@@ -7564,6 +8687,7 @@
                             if (ch ===  '\r' && source[index] === '\n') {
                                 ++index;
                             }
+                            lineStart = index;
                         }
                     } else if (isLineTerminator(ch.charCodeAt(0))) {
                         break;
@@ -7580,45 +8704,56 @@
                     type: Token.StringLiteral,
                     value: str,
                     octal: octal,
+                    startLineNumber: startLineNumber,
+                    startLineStart: startLineStart,
                     lineNumber: lineNumber,
                     lineStart: lineStart,
-                    range: [start, index]
+                    start: start,
+                    end: index
                 };
             }
         
-            function scanRegExp() {
-                var str, ch, start, pattern, flags, value, classMarker = false, restore, terminated = false;
+            function testRegExp(pattern, flags) {
+                var value;
+                try {
+                    value = new RegExp(pattern, flags);
+                } catch (e) {
+                    throwError({}, Messages.InvalidRegExp);
+                }
+                return value;
+            }
         
-                lookahead = null;
-                skipComment();
+            function scanRegExpBody() {
+                var ch, str, classMarker, terminated, body;
         
-                start = index;
                 ch = source[index];
                 assert(ch === '/', 'Regular expression literal must start with a slash');
                 str = source[index++];
         
+                classMarker = false;
+                terminated = false;
                 while (index < length) {
                     ch = source[index++];
                     str += ch;
-                    if (classMarker) {
+                    if (ch === '\\') {
+                        ch = source[index++];
+                        // ECMA-262 7.8.5
+                        if (isLineTerminator(ch.charCodeAt(0))) {
+                            throwError({}, Messages.UnterminatedRegExp);
+                        }
+                        str += ch;
+                    } else if (isLineTerminator(ch.charCodeAt(0))) {
+                        throwError({}, Messages.UnterminatedRegExp);
+                    } else if (classMarker) {
                         if (ch === ']') {
                             classMarker = false;
                         }
                     } else {
-                        if (ch === '\\') {
-                            ch = source[index++];
-                            // ECMA-262 7.8.5
-                            if (isLineTerminator(ch.charCodeAt(0))) {
-                                throwError({}, Messages.UnterminatedRegExp);
-                            }
-                            str += ch;
-                        } else if (ch === '/') {
+                        if (ch === '/') {
                             terminated = true;
                             break;
                         } else if (ch === '[') {
                             classMarker = true;
-                        } else if (isLineTerminator(ch.charCodeAt(0))) {
-                            throwError({}, Messages.UnterminatedRegExp);
                         }
                     }
                 }
@@ -7628,8 +8763,17 @@
                 }
         
                 // Exclude leading and trailing slash.
-                pattern = str.substr(1, str.length - 2);
+                body = str.substr(1, str.length - 2);
+                return {
+                    value: body,
+                    literal: str
+                };
+            }
         
+            function scanRegExpFlags() {
+                var ch, str, flags, restore;
+        
+                str = '';
                 flags = '';
                 while (index < length) {
                     ch = source[index];
@@ -7654,8 +8798,10 @@
                                 flags += 'u';
                                 str += '\\u';
                             }
+                            throwErrorTolerant({}, Messages.UnexpectedToken, 'ILLEGAL');
                         } else {
                             str += '\\';
+                            throwErrorTolerant({}, Messages.UnexpectedToken, 'ILLEGAL');
                         }
                     } else {
                         flags += ch;
@@ -7663,14 +8809,22 @@
                     }
                 }
         
-                try {
-                    value = new RegExp(pattern, flags);
-                } catch (e) {
-                    throwError({}, Messages.InvalidRegExp);
-                }
+                return {
+                    value: flags,
+                    literal: str
+                };
+            }
         
-                peek();
+            function scanRegExp() {
+                var start, body, flags, value;
         
+                lookahead = null;
+                skipComment();
+                start = index;
+        
+                body = scanRegExpBody();
+                flags = scanRegExpFlags();
+                value = testRegExp(body.value, flags.value);
         
                 if (extra.tokenize) {
                     return {
@@ -7678,14 +8832,59 @@
                         value: value,
                         lineNumber: lineNumber,
                         lineStart: lineStart,
-                        range: [start, index]
+                        start: start,
+                        end: index
                     };
                 }
+        
                 return {
-                    literal: str,
+                    literal: body.literal + flags.literal,
                     value: value,
-                    range: [start, index]
+                    start: start,
+                    end: index
                 };
+            }
+        
+            function collectRegex() {
+                var pos, loc, regex, token;
+        
+                skipComment();
+        
+                pos = index;
+                loc = {
+                    start: {
+                        line: lineNumber,
+                        column: index - lineStart
+                    }
+                };
+        
+                regex = scanRegExp();
+                loc.end = {
+                    line: lineNumber,
+                    column: index - lineStart
+                };
+        
+                /* istanbul ignore next */
+                if (!extra.tokenize) {
+                    // Pop the previous token, which is likely '/' or '/='
+                    if (extra.tokens.length > 0) {
+                        token = extra.tokens[extra.tokens.length - 1];
+                        if (token.range[0] === pos && token.type === 'Punctuator') {
+                            if (token.value === '/' || token.value === '/=') {
+                                extra.tokens.pop();
+                            }
+                        }
+                    }
+        
+                    extra.tokens.push({
+                        type: 'RegularExpression',
+                        value: regex.literal,
+                        range: [pos, index],
+                        loc: loc
+                    });
+                }
+        
+                return regex;
             }
         
             function isIdentifierName(token) {
@@ -7703,9 +8902,12 @@
                 prevToken = extra.tokens[extra.tokens.length - 1];
                 if (!prevToken) {
                     // Nothing before that: it cannot be a division.
-                    return scanRegExp();
+                    return collectRegex();
                 }
                 if (prevToken.type === 'Punctuator') {
+                    if (prevToken.value === ']') {
+                        return scanPunctuator();
+                    }
                     if (prevToken.value === ')') {
                         checkToken = extra.tokens[extra.openParenToken - 1];
                         if (checkToken &&
@@ -7714,7 +8916,7 @@
                                  checkToken.value === 'while' ||
                                  checkToken.value === 'for' ||
                                  checkToken.value === 'with')) {
-                            return scanRegExp();
+                            return collectRegex();
                         }
                         return scanPunctuator();
                     }
@@ -7733,7 +8935,7 @@
                             // Named function.
                             checkToken = extra.tokens[extra.openCurlyToken - 5];
                             if (!checkToken) {
-                                return scanRegExp();
+                                return collectRegex();
                             }
                         } else {
                             return scanPunctuator();
@@ -7745,12 +8947,12 @@
                             return scanPunctuator();
                         }
                         // It is a declaration.
-                        return scanRegExp();
+                        return collectRegex();
                     }
-                    return scanRegExp();
+                    return collectRegex();
                 }
                 if (prevToken.type === 'Keyword') {
-                    return scanRegExp();
+                    return collectRegex();
                 }
                 return scanPunctuator();
             }
@@ -7765,29 +8967,31 @@
                         type: Token.EOF,
                         lineNumber: lineNumber,
                         lineStart: lineStart,
-                        range: [index, index]
+                        start: index,
+                        end: index
                     };
                 }
         
                 ch = source.charCodeAt(index);
         
-                // Very common: ( and ) and ;
-                if (ch === 40 || ch === 41 || ch === 58) {
-                    return scanPunctuator();
-                }
-        
-                // String literal starts with single quote (#39) or double quote (#34).
-                if (ch === 39 || ch === 34) {
-                    return scanStringLiteral();
-                }
-        
                 if (isIdentifierStart(ch)) {
                     return scanIdentifier();
                 }
         
-                // Dot (.) char #46 can also start a floating-point number, hence the need
+                // Very common: ( and ) and ;
+                if (ch === 0x28 || ch === 0x29 || ch === 0x3B) {
+                    return scanPunctuator();
+                }
+        
+                // String literal starts with single quote (U+0027) or double quote (U+0022).
+                if (ch === 0x27 || ch === 0x22) {
+                    return scanStringLiteral();
+                }
+        
+        
+                // Dot (.) U+002E can also start a floating-point number, hence the need
                 // to check the next character.
-                if (ch === 46) {
+                if (ch === 0x2E) {
                     if (isDecimalDigit(source.charCodeAt(index + 1))) {
                         return scanNumericLiteral();
                     }
@@ -7798,25 +9002,55 @@
                     return scanNumericLiteral();
                 }
         
-                // Slash (/) char #47 can also start a regex.
-                if (extra.tokenize && ch === 47) {
+                // Slash (/) U+002F can also start a regex.
+                if (extra.tokenize && ch === 0x2F) {
                     return advanceSlash();
                 }
         
                 return scanPunctuator();
             }
         
+            function collectToken() {
+                var loc, token, value;
+        
+                skipComment();
+                loc = {
+                    start: {
+                        line: lineNumber,
+                        column: index - lineStart
+                    }
+                };
+        
+                token = advance();
+                loc.end = {
+                    line: lineNumber,
+                    column: index - lineStart
+                };
+        
+                if (token.type !== Token.EOF) {
+                    value = source.slice(token.start, token.end);
+                    extra.tokens.push({
+                        type: TokenName[token.type],
+                        value: value,
+                        range: [token.start, token.end],
+                        loc: loc
+                    });
+                }
+        
+                return token;
+            }
+        
             function lex() {
                 var token;
         
                 token = lookahead;
-                index = token.range[1];
+                index = token.end;
                 lineNumber = token.lineNumber;
                 lineStart = token.lineStart;
         
-                lookahead = advance();
+                lookahead = (typeof extra.tokens !== 'undefined') ? collectToken() : advance();
         
-                index = token.range[1];
+                index = token.end;
                 lineNumber = token.lineNumber;
                 lineStart = token.lineStart;
         
@@ -7829,395 +9063,464 @@
                 pos = index;
                 line = lineNumber;
                 start = lineStart;
-                lookahead = advance();
+                lookahead = (typeof extra.tokens !== 'undefined') ? collectToken() : advance();
                 index = pos;
                 lineNumber = line;
                 lineStart = start;
             }
         
-            SyntaxTreeDelegate = {
+            function Position() {
+                this.line = lineNumber;
+                this.column = index - lineStart;
+            }
         
-                name: 'SyntaxTree',
+            function SourceLocation() {
+                this.start = new Position();
+                this.end = null;
+            }
         
-                markStart: function () {
-                    if (extra.loc) {
-                        state.markerStack.push(index - lineStart);
-                        state.markerStack.push(lineNumber);
-                    }
-                    if (extra.range) {
-                        state.markerStack.push(index);
-                    }
-                },
+            function WrappingSourceLocation(startToken) {
+                if (startToken.type === Token.StringLiteral) {
+                    this.start = {
+                        line: startToken.startLineNumber,
+                        column: startToken.start - startToken.startLineStart
+                    };
+                } else {
+                    this.start = {
+                        line: startToken.lineNumber,
+                        column: startToken.start - startToken.lineStart
+                    };
+                }
+                this.end = null;
+            }
         
-                markEnd: function (node) {
-                    if (extra.range) {
-                        node.range = [state.markerStack.pop(), index];
-                    }
-                    if (extra.loc) {
-                        node.loc = {
-                            start: {
-                                line: state.markerStack.pop(),
-                                column: state.markerStack.pop()
-                            },
-                            end: {
-                                line: lineNumber,
-                                column: index - lineStart
-                            }
-                        };
-                        this.postProcess(node);
-                    }
-                    return node;
-                },
+            function Node() {
+                // Skip comment.
+                index = lookahead.start;
+                if (lookahead.type === Token.StringLiteral) {
+                    lineNumber = lookahead.startLineNumber;
+                    lineStart = lookahead.startLineStart;
+                } else {
+                    lineNumber = lookahead.lineNumber;
+                    lineStart = lookahead.lineStart;
+                }
+                if (extra.range) {
+                    this.range = [index, 0];
+                }
+                if (extra.loc) {
+                    this.loc = new SourceLocation();
+                }
+            }
         
-                markEndIf: function (node) {
-                    if (node.range || node.loc) {
-                        if (extra.loc) {
-                            state.markerStack.pop();
-                            state.markerStack.pop();
+            function WrappingNode(startToken) {
+                if (extra.range) {
+                    this.range = [startToken.start, 0];
+                }
+                if (extra.loc) {
+                    this.loc = new WrappingSourceLocation(startToken);
+                }
+            }
+        
+            WrappingNode.prototype = Node.prototype = {
+        
+                processComment: function () {
+                    var lastChild,
+                        trailingComments,
+                        bottomRight = extra.bottomRightStack,
+                        last = bottomRight[bottomRight.length - 1];
+        
+                    if (this.type === Syntax.Program) {
+                        if (this.body.length > 0) {
+                            return;
                         }
-                        if (extra.range) {
-                            state.markerStack.pop();
+                    }
+        
+                    if (extra.trailingComments.length > 0) {
+                        if (extra.trailingComments[0].range[0] >= this.range[1]) {
+                            trailingComments = extra.trailingComments;
+                            extra.trailingComments = [];
+                        } else {
+                            extra.trailingComments.length = 0;
                         }
                     } else {
-                        this.markEnd(node);
+                        if (last && last.trailingComments && last.trailingComments[0].range[0] >= this.range[1]) {
+                            trailingComments = last.trailingComments;
+                            delete last.trailingComments;
+                        }
                     }
-                    return node;
-                },
         
-                postProcess: function (node) {
-                    if (extra.source) {
-                        node.loc.source = extra.source;
+                    // Eating the stack.
+                    if (last) {
+                        while (last && last.range[0] >= this.range[0]) {
+                            lastChild = last;
+                            last = bottomRight.pop();
+                        }
                     }
-                    return node;
-                },
         
-                createArrayExpression: function (elements) {
-                    return {
-                        type: Syntax.ArrayExpression,
-                        elements: elements
-                    };
-                },
-        
-                createAssignmentExpression: function (operator, left, right) {
-                    return {
-                        type: Syntax.AssignmentExpression,
-                        operator: operator,
-                        left: left,
-                        right: right
-                    };
-                },
-        
-                createBinaryExpression: function (operator, left, right) {
-                    var type = (operator === '||' || operator === '&&') ? Syntax.LogicalExpression :
-                                Syntax.BinaryExpression;
-                    return {
-                        type: type,
-                        operator: operator,
-                        left: left,
-                        right: right
-                    };
-                },
-        
-                createBlockStatement: function (body) {
-                    return {
-                        type: Syntax.BlockStatement,
-                        body: body
-                    };
-                },
-        
-                createBreakStatement: function (label) {
-                    return {
-                        type: Syntax.BreakStatement,
-                        label: label
-                    };
-                },
-        
-                createCallExpression: function (callee, args) {
-                    return {
-                        type: Syntax.CallExpression,
-                        callee: callee,
-                        'arguments': args
-                    };
-                },
-        
-                createCatchClause: function (param, body) {
-                    return {
-                        type: Syntax.CatchClause,
-                        param: param,
-                        body: body
-                    };
-                },
-        
-                createConditionalExpression: function (test, consequent, alternate) {
-                    return {
-                        type: Syntax.ConditionalExpression,
-                        test: test,
-                        consequent: consequent,
-                        alternate: alternate
-                    };
-                },
-        
-                createContinueStatement: function (label) {
-                    return {
-                        type: Syntax.ContinueStatement,
-                        label: label
-                    };
-                },
-        
-                createDebuggerStatement: function () {
-                    return {
-                        type: Syntax.DebuggerStatement
-                    };
-                },
-        
-                createDoWhileStatement: function (body, test) {
-                    return {
-                        type: Syntax.DoWhileStatement,
-                        body: body,
-                        test: test
-                    };
-                },
-        
-                createEmptyStatement: function () {
-                    return {
-                        type: Syntax.EmptyStatement
-                    };
-                },
-        
-                createExpressionStatement: function (expression) {
-                    return {
-                        type: Syntax.ExpressionStatement,
-                        expression: expression
-                    };
-                },
-        
-                createForStatement: function (init, test, update, body) {
-                    return {
-                        type: Syntax.ForStatement,
-                        init: init,
-                        test: test,
-                        update: update,
-                        body: body
-                    };
-                },
-        
-                createForInStatement: function (left, right, body) {
-                    return {
-                        type: Syntax.ForInStatement,
-                        left: left,
-                        right: right,
-                        body: body,
-                        each: false
-                    };
-                },
-        
-                createFunctionDeclaration: function (id, params, defaults, body) {
-                    return {
-                        type: Syntax.FunctionDeclaration,
-                        id: id,
-                        params: params,
-                        defaults: defaults,
-                        body: body,
-                        rest: null,
-                        generator: false,
-                        expression: false
-                    };
-                },
-        
-                createFunctionExpression: function (id, params, defaults, body) {
-                    return {
-                        type: Syntax.FunctionExpression,
-                        id: id,
-                        params: params,
-                        defaults: defaults,
-                        body: body,
-                        rest: null,
-                        generator: false,
-                        expression: false
-                    };
-                },
-        
-                createIdentifier: function (name) {
-                    return {
-                        type: Syntax.Identifier,
-                        name: name
-                    };
-                },
-        
-                createIfStatement: function (test, consequent, alternate) {
-                    return {
-                        type: Syntax.IfStatement,
-                        test: test,
-                        consequent: consequent,
-                        alternate: alternate
-                    };
-                },
-        
-                createLabeledStatement: function (label, body) {
-                    return {
-                        type: Syntax.LabeledStatement,
-                        label: label,
-                        body: body
-                    };
-                },
-        
-                createLiteral: function (token) {
-                    return {
-                        type: Syntax.Literal,
-                        value: token.value,
-                        raw: source.slice(token.range[0], token.range[1])
-                    };
-                },
-        
-                createMemberExpression: function (accessor, object, property) {
-                    return {
-                        type: Syntax.MemberExpression,
-                        computed: accessor === '[',
-                        object: object,
-                        property: property
-                    };
-                },
-        
-                createNewExpression: function (callee, args) {
-                    return {
-                        type: Syntax.NewExpression,
-                        callee: callee,
-                        'arguments': args
-                    };
-                },
-        
-                createObjectExpression: function (properties) {
-                    return {
-                        type: Syntax.ObjectExpression,
-                        properties: properties
-                    };
-                },
-        
-                createPostfixExpression: function (operator, argument) {
-                    return {
-                        type: Syntax.UpdateExpression,
-                        operator: operator,
-                        argument: argument,
-                        prefix: false
-                    };
-                },
-        
-                createProgram: function (body) {
-                    return {
-                        type: Syntax.Program,
-                        body: body
-                    };
-                },
-        
-                createProperty: function (kind, key, value) {
-                    return {
-                        type: Syntax.Property,
-                        key: key,
-                        value: value,
-                        kind: kind
-                    };
-                },
-        
-                createReturnStatement: function (argument) {
-                    return {
-                        type: Syntax.ReturnStatement,
-                        argument: argument
-                    };
-                },
-        
-                createSequenceExpression: function (expressions) {
-                    return {
-                        type: Syntax.SequenceExpression,
-                        expressions: expressions
-                    };
-                },
-        
-                createSwitchCase: function (test, consequent) {
-                    return {
-                        type: Syntax.SwitchCase,
-                        test: test,
-                        consequent: consequent
-                    };
-                },
-        
-                createSwitchStatement: function (discriminant, cases) {
-                    return {
-                        type: Syntax.SwitchStatement,
-                        discriminant: discriminant,
-                        cases: cases
-                    };
-                },
-        
-                createThisExpression: function () {
-                    return {
-                        type: Syntax.ThisExpression
-                    };
-                },
-        
-                createThrowStatement: function (argument) {
-                    return {
-                        type: Syntax.ThrowStatement,
-                        argument: argument
-                    };
-                },
-        
-                createTryStatement: function (block, guardedHandlers, handlers, finalizer) {
-                    return {
-                        type: Syntax.TryStatement,
-                        block: block,
-                        guardedHandlers: guardedHandlers,
-                        handlers: handlers,
-                        finalizer: finalizer
-                    };
-                },
-        
-                createUnaryExpression: function (operator, argument) {
-                    if (operator === '++' || operator === '--') {
-                        return {
-                            type: Syntax.UpdateExpression,
-                            operator: operator,
-                            argument: argument,
-                            prefix: true
-                        };
+                    if (lastChild) {
+                        if (lastChild.leadingComments && lastChild.leadingComments[lastChild.leadingComments.length - 1].range[1] <= this.range[0]) {
+                            this.leadingComments = lastChild.leadingComments;
+                            lastChild.leadingComments = undefined;
+                        }
+                    } else if (extra.leadingComments.length > 0 && extra.leadingComments[extra.leadingComments.length - 1].range[1] <= this.range[0]) {
+                        this.leadingComments = extra.leadingComments;
+                        extra.leadingComments = [];
                     }
-                    return {
-                        type: Syntax.UnaryExpression,
-                        operator: operator,
-                        argument: argument,
-                        prefix: true
-                    };
+        
+        
+                    if (trailingComments) {
+                        this.trailingComments = trailingComments;
+                    }
+        
+                    bottomRight.push(this);
                 },
         
-                createVariableDeclaration: function (declarations, kind) {
-                    return {
-                        type: Syntax.VariableDeclaration,
-                        declarations: declarations,
-                        kind: kind
-                    };
+                finish: function () {
+                    if (extra.range) {
+                        this.range[1] = index;
+                    }
+                    if (extra.loc) {
+                        this.loc.end = new Position();
+                        if (extra.source) {
+                            this.loc.source = extra.source;
+                        }
+                    }
+        
+                    if (extra.attachComment) {
+                        this.processComment();
+                    }
                 },
         
-                createVariableDeclarator: function (id, init) {
-                    return {
-                        type: Syntax.VariableDeclarator,
-                        id: id,
-                        init: init
-                    };
+                finishArrayExpression: function (elements) {
+                    this.type = Syntax.ArrayExpression;
+                    this.elements = elements;
+                    this.finish();
+                    return this;
                 },
         
-                createWhileStatement: function (test, body) {
-                    return {
-                        type: Syntax.WhileStatement,
-                        test: test,
-                        body: body
-                    };
+                finishArrowFunctionExpression: function (params, defaults, body, expression) {
+                    this.type = Syntax.ArrowFunctionExpression;
+                    this.id = null;
+                    this.params = params;
+                    this.defaults = defaults;
+                    this.body = body;
+                    this.rest = null;
+                    this.generator = false;
+                    this.expression = expression;
+                    this.finish();
+                    return this;
                 },
         
-                createWithStatement: function (object, body) {
-                    return {
-                        type: Syntax.WithStatement,
-                        object: object,
-                        body: body
-                    };
+                finishAssignmentExpression: function (operator, left, right) {
+                    this.type = Syntax.AssignmentExpression;
+                    this.operator = operator;
+                    this.left = left;
+                    this.right = right;
+                    this.finish();
+                    return this;
+                },
+        
+                finishBinaryExpression: function (operator, left, right) {
+                    this.type = (operator === '||' || operator === '&&') ? Syntax.LogicalExpression : Syntax.BinaryExpression;
+                    this.operator = operator;
+                    this.left = left;
+                    this.right = right;
+                    this.finish();
+                    return this;
+                },
+        
+                finishBlockStatement: function (body) {
+                    this.type = Syntax.BlockStatement;
+                    this.body = body;
+                    this.finish();
+                    return this;
+                },
+        
+                finishBreakStatement: function (label) {
+                    this.type = Syntax.BreakStatement;
+                    this.label = label;
+                    this.finish();
+                    return this;
+                },
+        
+                finishCallExpression: function (callee, args) {
+                    this.type = Syntax.CallExpression;
+                    this.callee = callee;
+                    this.arguments = args;
+                    this.finish();
+                    return this;
+                },
+        
+                finishCatchClause: function (param, body) {
+                    this.type = Syntax.CatchClause;
+                    this.param = param;
+                    this.body = body;
+                    this.finish();
+                    return this;
+                },
+        
+                finishConditionalExpression: function (test, consequent, alternate) {
+                    this.type = Syntax.ConditionalExpression;
+                    this.test = test;
+                    this.consequent = consequent;
+                    this.alternate = alternate;
+                    this.finish();
+                    return this;
+                },
+        
+                finishContinueStatement: function (label) {
+                    this.type = Syntax.ContinueStatement;
+                    this.label = label;
+                    this.finish();
+                    return this;
+                },
+        
+                finishDebuggerStatement: function () {
+                    this.type = Syntax.DebuggerStatement;
+                    this.finish();
+                    return this;
+                },
+        
+                finishDoWhileStatement: function (body, test) {
+                    this.type = Syntax.DoWhileStatement;
+                    this.body = body;
+                    this.test = test;
+                    this.finish();
+                    return this;
+                },
+        
+                finishEmptyStatement: function () {
+                    this.type = Syntax.EmptyStatement;
+                    this.finish();
+                    return this;
+                },
+        
+                finishExpressionStatement: function (expression) {
+                    this.type = Syntax.ExpressionStatement;
+                    this.expression = expression;
+                    this.finish();
+                    return this;
+                },
+        
+                finishForStatement: function (init, test, update, body) {
+                    this.type = Syntax.ForStatement;
+                    this.init = init;
+                    this.test = test;
+                    this.update = update;
+                    this.body = body;
+                    this.finish();
+                    return this;
+                },
+        
+                finishForInStatement: function (left, right, body) {
+                    this.type = Syntax.ForInStatement;
+                    this.left = left;
+                    this.right = right;
+                    this.body = body;
+                    this.each = false;
+                    this.finish();
+                    return this;
+                },
+        
+                finishFunctionDeclaration: function (id, params, defaults, body) {
+                    this.type = Syntax.FunctionDeclaration;
+                    this.id = id;
+                    this.params = params;
+                    this.defaults = defaults;
+                    this.body = body;
+                    this.rest = null;
+                    this.generator = false;
+                    this.expression = false;
+                    this.finish();
+                    return this;
+                },
+        
+                finishFunctionExpression: function (id, params, defaults, body) {
+                    this.type = Syntax.FunctionExpression;
+                    this.id = id;
+                    this.params = params;
+                    this.defaults = defaults;
+                    this.body = body;
+                    this.rest = null;
+                    this.generator = false;
+                    this.expression = false;
+                    this.finish();
+                    return this;
+                },
+        
+                finishIdentifier: function (name) {
+                    this.type = Syntax.Identifier;
+                    this.name = name;
+                    this.finish();
+                    return this;
+                },
+        
+                finishIfStatement: function (test, consequent, alternate) {
+                    this.type = Syntax.IfStatement;
+                    this.test = test;
+                    this.consequent = consequent;
+                    this.alternate = alternate;
+                    this.finish();
+                    return this;
+                },
+        
+                finishLabeledStatement: function (label, body) {
+                    this.type = Syntax.LabeledStatement;
+                    this.label = label;
+                    this.body = body;
+                    this.finish();
+                    return this;
+                },
+        
+                finishLiteral: function (token) {
+                    this.type = Syntax.Literal;
+                    this.value = token.value;
+                    this.raw = source.slice(token.start, token.end);
+                    this.finish();
+                    return this;
+                },
+        
+                finishMemberExpression: function (accessor, object, property) {
+                    this.type = Syntax.MemberExpression;
+                    this.computed = accessor === '[';
+                    this.object = object;
+                    this.property = property;
+                    this.finish();
+                    return this;
+                },
+        
+                finishNewExpression: function (callee, args) {
+                    this.type = Syntax.NewExpression;
+                    this.callee = callee;
+                    this.arguments = args;
+                    this.finish();
+                    return this;
+                },
+        
+                finishObjectExpression: function (properties) {
+                    this.type = Syntax.ObjectExpression;
+                    this.properties = properties;
+                    this.finish();
+                    return this;
+                },
+        
+                finishPostfixExpression: function (operator, argument) {
+                    this.type = Syntax.UpdateExpression;
+                    this.operator = operator;
+                    this.argument = argument;
+                    this.prefix = false;
+                    this.finish();
+                    return this;
+                },
+        
+                finishProgram: function (body) {
+                    this.type = Syntax.Program;
+                    this.body = body;
+                    this.finish();
+                    return this;
+                },
+        
+                finishProperty: function (kind, key, value) {
+                    this.type = Syntax.Property;
+                    this.key = key;
+                    this.value = value;
+                    this.kind = kind;
+                    this.finish();
+                    return this;
+                },
+        
+                finishReturnStatement: function (argument) {
+                    this.type = Syntax.ReturnStatement;
+                    this.argument = argument;
+                    this.finish();
+                    return this;
+                },
+        
+                finishSequenceExpression: function (expressions) {
+                    this.type = Syntax.SequenceExpression;
+                    this.expressions = expressions;
+                    this.finish();
+                    return this;
+                },
+        
+                finishSwitchCase: function (test, consequent) {
+                    this.type = Syntax.SwitchCase;
+                    this.test = test;
+                    this.consequent = consequent;
+                    this.finish();
+                    return this;
+                },
+        
+                finishSwitchStatement: function (discriminant, cases) {
+                    this.type = Syntax.SwitchStatement;
+                    this.discriminant = discriminant;
+                    this.cases = cases;
+                    this.finish();
+                    return this;
+                },
+        
+                finishThisExpression: function () {
+                    this.type = Syntax.ThisExpression;
+                    this.finish();
+                    return this;
+                },
+        
+                finishThrowStatement: function (argument) {
+                    this.type = Syntax.ThrowStatement;
+                    this.argument = argument;
+                    this.finish();
+                    return this;
+                },
+        
+                finishTryStatement: function (block, guardedHandlers, handlers, finalizer) {
+                    this.type = Syntax.TryStatement;
+                    this.block = block;
+                    this.guardedHandlers = guardedHandlers;
+                    this.handlers = handlers;
+                    this.finalizer = finalizer;
+                    this.finish();
+                    return this;
+                },
+        
+                finishUnaryExpression: function (operator, argument) {
+                    this.type = (operator === '++' || operator === '--') ? Syntax.UpdateExpression : Syntax.UnaryExpression;
+                    this.operator = operator;
+                    this.argument = argument;
+                    this.prefix = true;
+                    this.finish();
+                    return this;
+                },
+        
+                finishVariableDeclaration: function (declarations, kind) {
+                    this.type = Syntax.VariableDeclaration;
+                    this.declarations = declarations;
+                    this.kind = kind;
+                    this.finish();
+                    return this;
+                },
+        
+                finishVariableDeclarator: function (id, init) {
+                    this.type = Syntax.VariableDeclarator;
+                    this.id = id;
+                    this.init = init;
+                    this.finish();
+                    return this;
+                },
+        
+                finishWhileStatement: function (test, body) {
+                    this.type = Syntax.WhileStatement;
+                    this.test = test;
+                    this.body = body;
+                    this.finish();
+                    return this;
+                },
+        
+                finishWithStatement: function (object, body) {
+                    this.type = Syntax.WithStatement;
+                    this.object = object;
+                    this.body = body;
+                    this.finish();
+                    return this;
                 }
             };
         
@@ -8253,9 +9556,9 @@
         
                 if (typeof token.lineNumber === 'number') {
                     error = new Error('Line ' + token.lineNumber + ': ' + msg);
-                    error.index = token.range[0];
+                    error.index = token.start;
                     error.lineNumber = token.lineNumber;
-                    error.column = token.range[0] - lineStart + 1;
+                    error.column = token.start - lineStart + 1;
                 } else {
                     error = new Error('Line ' + lineNumber + ': ' + msg);
                     error.index = index;
@@ -8323,6 +9626,26 @@
                 }
             }
         
+            /**
+             * @name expectTolerant
+             * @description Quietly expect the given token value when in tolerant mode, otherwise delegates
+             * to <code>expect(value)</code>
+             * @param {String} value The value we are expecting the lookahead token to have
+             * @since 2.0
+             */
+            function expectTolerant(value) {
+                if (extra.errors) {
+                    var token = lookahead;
+                    if (token.type !== Token.Punctuator && token.value !== value) {
+                        throwErrorTolerant(token, Messages.UnexpectedToken, token.value);
+                    } else {
+                        lex();
+                    }
+                } else {
+                    expect(value);
+                }
+            }
+        
             // Expect the next token to match the specified keyword.
             // If not, an exception will be thrown.
         
@@ -8371,8 +9694,8 @@
             function consumeSemicolon() {
                 var line;
         
-                // Catch the very common case first: immediately a semicolon (char #59).
-                if (source.charCodeAt(index) === 59) {
+                // Catch the very common case first: immediately a semicolon (U+003B).
+                if (source.charCodeAt(index) === 0x3B || match(';')) {
                     lex();
                     return;
                 }
@@ -8380,11 +9703,6 @@
                 line = lineNumber;
                 skipComment();
                 if (lineNumber !== line) {
-                    return;
-                }
-        
-                if (match(';')) {
-                    lex();
                     return;
                 }
         
@@ -8402,7 +9720,7 @@
             // 11.1.4 Array Initialiser
         
             function parseArrayInitialiser() {
-                var elements = [];
+                var elements = [], node = new Node();
         
                 expect('[');
         
@@ -8419,32 +9737,28 @@
                     }
                 }
         
-                expect(']');
+                lex();
         
-                return delegate.createArrayExpression(elements);
+                return node.finishArrayExpression(elements);
             }
         
             // 11.1.5 Object Initialiser
         
             function parsePropertyFunction(param, first) {
-                var previousStrict, body;
+                var previousStrict, body, node = new Node();
         
                 previousStrict = strict;
-                skipComment();
-                delegate.markStart();
                 body = parseFunctionSourceElements();
                 if (first && strict && isRestrictedWord(param[0].name)) {
                     throwErrorTolerant(first, Messages.StrictParamName);
                 }
                 strict = previousStrict;
-                return delegate.markEnd(delegate.createFunctionExpression(null, param, [], body));
+                return node.finishFunctionExpression(null, param, [], body);
             }
         
             function parseObjectPropertyKey() {
-                var token;
+                var token, node = new Node();
         
-                skipComment();
-                delegate.markStart();
                 token = lex();
         
                 // Note: This function is called only from parseObjectProperty(), where
@@ -8454,18 +9768,16 @@
                     if (strict && token.octal) {
                         throwErrorTolerant(token, Messages.StrictOctalLiteral);
                     }
-                    return delegate.markEnd(delegate.createLiteral(token));
+                    return node.finishLiteral(token);
                 }
         
-                return delegate.markEnd(delegate.createIdentifier(token.value));
+                return node.finishIdentifier(token.value);
             }
         
             function parseObjectProperty() {
-                var token, key, id, value, param;
+                var token, key, id, value, param, node = new Node();
         
                 token = lookahead;
-                skipComment();
-                delegate.markStart();
         
                 if (token.type === Token.Identifier) {
         
@@ -8478,7 +9790,7 @@
                         expect('(');
                         expect(')');
                         value = parsePropertyFunction([]);
-                        return delegate.markEnd(delegate.createProperty('get', key, value));
+                        return node.finishProperty('get', key, value);
                     }
                     if (token.value === 'set' && !match(':')) {
                         key = parseObjectPropertyKey();
@@ -8493,11 +9805,11 @@
                             expect(')');
                             value = parsePropertyFunction(param, token);
                         }
-                        return delegate.markEnd(delegate.createProperty('set', key, value));
+                        return node.finishProperty('set', key, value);
                     }
                     expect(':');
                     value = parseAssignmentExpression();
-                    return delegate.markEnd(delegate.createProperty('init', id, value));
+                    return node.finishProperty('init', id, value);
                 }
                 if (token.type === Token.EOF || token.type === Token.Punctuator) {
                     throwUnexpected(token);
@@ -8505,12 +9817,12 @@
                     key = parseObjectPropertyKey();
                     expect(':');
                     value = parseAssignmentExpression();
-                    return delegate.markEnd(delegate.createProperty('init', key, value));
+                    return node.finishProperty('init', key, value);
                 }
             }
         
             function parseObjectInitialiser() {
-                var properties = [], property, name, key, kind, map = {}, toString = String;
+                var properties = [], token, property, name, key, kind, map = {}, toString = String, node = new Node();
         
                 expect('{');
         
@@ -8547,13 +9859,13 @@
                     properties.push(property);
         
                     if (!match('}')) {
-                        expect(',');
+                        expectTolerant(',');
                     }
                 }
         
                 expect('}');
         
-                return delegate.createObjectExpression(properties);
+                return node.finishObjectExpression(properties);
             }
         
             // 11.1.6 The Grouping Operator
@@ -8562,6 +9874,13 @@
                 var expr;
         
                 expect('(');
+        
+                if (match(')')) {
+                    lex();
+                    return PlaceHolders.ArrowParameterPlaceHolder;
+                }
+        
+                ++state.parenthesisCount;
         
                 expr = parseExpression();
         
@@ -8574,50 +9893,60 @@
             // 11.1 Primary Expressions
         
             function parsePrimaryExpression() {
-                var type, token, expr;
+                var type, token, expr, node;
         
                 if (match('(')) {
                     return parseGroupExpression();
                 }
         
+                if (match('[')) {
+                    return parseArrayInitialiser();
+                }
+        
+                if (match('{')) {
+                    return parseObjectInitialiser();
+                }
+        
                 type = lookahead.type;
-                delegate.markStart();
+                node = new Node();
         
                 if (type === Token.Identifier) {
-                    expr =  delegate.createIdentifier(lex().value);
+                    expr =  node.finishIdentifier(lex().value);
                 } else if (type === Token.StringLiteral || type === Token.NumericLiteral) {
                     if (strict && lookahead.octal) {
                         throwErrorTolerant(lookahead, Messages.StrictOctalLiteral);
                     }
-                    expr = delegate.createLiteral(lex());
+                    expr = node.finishLiteral(lex());
                 } else if (type === Token.Keyword) {
+                    if (matchKeyword('function')) {
+                        return parseFunctionExpression();
+                    }
                     if (matchKeyword('this')) {
                         lex();
-                        expr = delegate.createThisExpression();
-                    } else if (matchKeyword('function')) {
-                        expr = parseFunctionExpression();
+                        expr = node.finishThisExpression();
+                    } else {
+                        throwUnexpected(lex());
                     }
                 } else if (type === Token.BooleanLiteral) {
                     token = lex();
                     token.value = (token.value === 'true');
-                    expr = delegate.createLiteral(token);
+                    expr = node.finishLiteral(token);
                 } else if (type === Token.NullLiteral) {
                     token = lex();
                     token.value = null;
-                    expr = delegate.createLiteral(token);
-                } else if (match('[')) {
-                    expr = parseArrayInitialiser();
-                } else if (match('{')) {
-                    expr = parseObjectInitialiser();
+                    expr = node.finishLiteral(token);
                 } else if (match('/') || match('/=')) {
-                    expr = delegate.createLiteral(scanRegExp());
+                    if (typeof extra.tokens !== 'undefined') {
+                        expr = node.finishLiteral(collectRegex());
+                    } else {
+                        expr = node.finishLiteral(scanRegExp());
+                    }
+                    peek();
+                } else {
+                    throwUnexpected(lex());
                 }
         
-                if (expr) {
-                    return delegate.markEnd(expr);
-                }
-        
-                throwUnexpected(lex());
+                return expr;
             }
         
             // 11.2 Left-Hand-Side Expressions
@@ -8633,7 +9962,7 @@
                         if (match(')')) {
                             break;
                         }
-                        expect(',');
+                        expectTolerant(',');
                     }
                 }
         
@@ -8643,16 +9972,15 @@
             }
         
             function parseNonComputedProperty() {
-                var token;
+                var token, node = new Node();
         
-                delegate.markStart();
                 token = lex();
         
                 if (!isIdentifierName(token)) {
                     throwUnexpected(token);
                 }
         
-                return delegate.markEnd(delegate.createIdentifier(token.value));
+                return node.finishIdentifier(token.value);
             }
         
             function parseNonComputedMember() {
@@ -8674,73 +10002,68 @@
             }
         
             function parseNewExpression() {
-                var callee, args;
+                var callee, args, node = new Node();
         
-                delegate.markStart();
                 expectKeyword('new');
                 callee = parseLeftHandSideExpression();
                 args = match('(') ? parseArguments() : [];
         
-                return delegate.markEnd(delegate.createNewExpression(callee, args));
+                return node.finishNewExpression(callee, args);
             }
         
             function parseLeftHandSideExpressionAllowCall() {
-                var marker, expr, args, property;
+                var expr, args, property, startToken, previousAllowIn = state.allowIn;
         
-                marker = createLocationMarker();
-        
+                startToken = lookahead;
+                state.allowIn = true;
                 expr = matchKeyword('new') ? parseNewExpression() : parsePrimaryExpression();
         
-                while (match('.') || match('[') || match('(')) {
-                    if (match('(')) {
+                for (;;) {
+                    if (match('.')) {
+                        property = parseNonComputedMember();
+                        expr = new WrappingNode(startToken).finishMemberExpression('.', expr, property);
+                    } else if (match('(')) {
                         args = parseArguments();
-                        expr = delegate.createCallExpression(expr, args);
+                        expr = new WrappingNode(startToken).finishCallExpression(expr, args);
                     } else if (match('[')) {
                         property = parseComputedMember();
-                        expr = delegate.createMemberExpression('[', expr, property);
+                        expr = new WrappingNode(startToken).finishMemberExpression('[', expr, property);
                     } else {
-                        property = parseNonComputedMember();
-                        expr = delegate.createMemberExpression('.', expr, property);
-                    }
-                    if (marker) {
-                        marker.end();
-                        marker.apply(expr);
+                        break;
                     }
                 }
+                state.allowIn = previousAllowIn;
         
                 return expr;
             }
         
             function parseLeftHandSideExpression() {
-                var marker, expr, property;
+                var expr, property, startToken;
+                assert(state.allowIn, 'callee of new expression always allow in keyword.');
         
-                marker = createLocationMarker();
+                startToken = lookahead;
         
                 expr = matchKeyword('new') ? parseNewExpression() : parsePrimaryExpression();
         
-                while (match('.') || match('[')) {
+                for (;;) {
                     if (match('[')) {
                         property = parseComputedMember();
-                        expr = delegate.createMemberExpression('[', expr, property);
-                    } else {
+                        expr = new WrappingNode(startToken).finishMemberExpression('[', expr, property);
+                    } else if (match('.')) {
                         property = parseNonComputedMember();
-                        expr = delegate.createMemberExpression('.', expr, property);
-                    }
-                    if (marker) {
-                        marker.end();
-                        marker.apply(expr);
+                        expr = new WrappingNode(startToken).finishMemberExpression('.', expr, property);
+                    } else {
+                        break;
                     }
                 }
-        
                 return expr;
             }
         
             // 11.3 Postfix Expressions
         
             function parsePostfixExpression() {
-                var expr, token;
+                var expr, token, startToken = lookahead;
         
-                delegate.markStart();
                 expr = parseLeftHandSideExpressionAllowCall();
         
                 if (lookahead.type === Token.Punctuator) {
@@ -8751,27 +10074,26 @@
                         }
         
                         if (!isLeftHandSide(expr)) {
-                            throwError({}, Messages.InvalidLHSInAssignment);
+                            throwErrorTolerant({}, Messages.InvalidLHSInAssignment);
                         }
         
                         token = lex();
-                        expr = delegate.createPostfixExpression(token.value, expr);
+                        expr = new WrappingNode(startToken).finishPostfixExpression(token.value, expr);
                     }
                 }
         
-                return delegate.markEndIf(expr);
+                return expr;
             }
         
             // 11.4 Unary Operators
         
             function parseUnaryExpression() {
-                var token, expr;
-        
-                delegate.markStart();
+                var token, expr, startToken;
         
                 if (lookahead.type !== Token.Punctuator && lookahead.type !== Token.Keyword) {
                     expr = parsePostfixExpression();
                 } else if (match('++') || match('--')) {
+                    startToken = lookahead;
                     token = lex();
                     expr = parseUnaryExpression();
                     // 11.4.4, 11.4.5
@@ -8780,18 +10102,20 @@
                     }
         
                     if (!isLeftHandSide(expr)) {
-                        throwError({}, Messages.InvalidLHSInAssignment);
+                        throwErrorTolerant({}, Messages.InvalidLHSInAssignment);
                     }
         
-                    expr = delegate.createUnaryExpression(token.value, expr);
+                    expr = new WrappingNode(startToken).finishUnaryExpression(token.value, expr);
                 } else if (match('+') || match('-') || match('~') || match('!')) {
+                    startToken = lookahead;
                     token = lex();
                     expr = parseUnaryExpression();
-                    expr = delegate.createUnaryExpression(token.value, expr);
+                    expr = new WrappingNode(startToken).finishUnaryExpression(token.value, expr);
                 } else if (matchKeyword('delete') || matchKeyword('void') || matchKeyword('typeof')) {
+                    startToken = lookahead;
                     token = lex();
                     expr = parseUnaryExpression();
-                    expr = delegate.createUnaryExpression(token.value, expr);
+                    expr = new WrappingNode(startToken).finishUnaryExpression(token.value, expr);
                     if (strict && expr.operator === 'delete' && expr.argument.type === Syntax.Identifier) {
                         throwErrorTolerant({}, Messages.StrictDelete);
                     }
@@ -8799,7 +10123,7 @@
                     expr = parsePostfixExpression();
                 }
         
-                return delegate.markEndIf(expr);
+                return expr;
             }
         
             function binaryPrecedence(token, allowIn) {
@@ -8882,68 +10206,55 @@
             // 11.11 Binary Logical Operators
         
             function parseBinaryExpression() {
-                var marker, markers, expr, token, prec, previousAllowIn, stack, right, operator, left, i;
+                var marker, markers, expr, token, prec, stack, right, operator, left, i;
         
-                previousAllowIn = state.allowIn;
-                state.allowIn = true;
-        
-                marker = createLocationMarker();
+                marker = lookahead;
                 left = parseUnaryExpression();
+                if (left === PlaceHolders.ArrowParameterPlaceHolder) {
+                    return left;
+                }
         
                 token = lookahead;
-                prec = binaryPrecedence(token, previousAllowIn);
+                prec = binaryPrecedence(token, state.allowIn);
                 if (prec === 0) {
                     return left;
                 }
                 token.prec = prec;
                 lex();
         
-                markers = [marker, createLocationMarker()];
+                markers = [marker, lookahead];
                 right = parseUnaryExpression();
         
                 stack = [left, token, right];
         
-                while ((prec = binaryPrecedence(lookahead, previousAllowIn)) > 0) {
+                while ((prec = binaryPrecedence(lookahead, state.allowIn)) > 0) {
         
                     // Reduce: make a binary expression from the three topmost entries.
                     while ((stack.length > 2) && (prec <= stack[stack.length - 2].prec)) {
                         right = stack.pop();
                         operator = stack.pop().value;
                         left = stack.pop();
-                        expr = delegate.createBinaryExpression(operator, left, right);
                         markers.pop();
-                        marker = markers.pop();
-                        if (marker) {
-                            marker.end();
-                            marker.apply(expr);
-                        }
+                        expr = new WrappingNode(markers[markers.length - 1]).finishBinaryExpression(operator, left, right);
                         stack.push(expr);
-                        markers.push(marker);
                     }
         
                     // Shift.
                     token = lex();
                     token.prec = prec;
                     stack.push(token);
-                    markers.push(createLocationMarker());
+                    markers.push(lookahead);
                     expr = parseUnaryExpression();
                     stack.push(expr);
                 }
-        
-                state.allowIn = previousAllowIn;
         
                 // Final reduce to clean-up the stack.
                 i = stack.length - 1;
                 expr = stack[i];
                 markers.pop();
                 while (i > 1) {
-                    expr = delegate.createBinaryExpression(stack[i - 1].value, stack[i - 2], expr);
+                    expr = new WrappingNode(markers.pop()).finishBinaryExpression(stack[i - 1].value, stack[i - 2], expr);
                     i -= 2;
-                    marker = markers.pop();
-                    if (marker) {
-                        marker.end();
-                        marker.apply(expr);
-                    }
                 }
         
                 return expr;
@@ -8953,11 +10264,14 @@
             // 11.12 Conditional Operator
         
             function parseConditionalExpression() {
-                var expr, previousAllowIn, consequent, alternate;
+                var expr, previousAllowIn, consequent, alternate, startToken;
         
-                delegate.markStart();
+                startToken = lookahead;
+        
                 expr = parseBinaryExpression();
-        
+                if (expr === PlaceHolders.ArrowParameterPlaceHolder) {
+                    return expr;
+                }
                 if (match('?')) {
                     lex();
                     previousAllowIn = state.allowIn;
@@ -8967,63 +10281,160 @@
                     expect(':');
                     alternate = parseAssignmentExpression();
         
-                    expr = delegate.markEnd(delegate.createConditionalExpression(expr, consequent, alternate));
-                } else {
-                    delegate.markEnd({});
+                    expr = new WrappingNode(startToken).finishConditionalExpression(expr, consequent, alternate);
                 }
         
                 return expr;
             }
         
+            // [ES6] 14.2 Arrow Function
+        
+            function parseConciseBody() {
+                if (match('{')) {
+                    return parseFunctionSourceElements();
+                }
+                return parseAssignmentExpression();
+            }
+        
+            function reinterpretAsCoverFormalsList(expressions) {
+                var i, len, param, params, defaults, defaultCount, options, rest;
+        
+                params = [];
+                defaults = [];
+                defaultCount = 0;
+                rest = null;
+                options = {
+                    paramSet: {}
+                };
+        
+                for (i = 0, len = expressions.length; i < len; i += 1) {
+                    param = expressions[i];
+                    if (param.type === Syntax.Identifier) {
+                        params.push(param);
+                        defaults.push(null);
+                        validateParam(options, param, param.name);
+                    } else if (param.type === Syntax.AssignmentExpression) {
+                        params.push(param.left);
+                        defaults.push(param.right);
+                        ++defaultCount;
+                        validateParam(options, param.left, param.left.name);
+                    } else {
+                        return null;
+                    }
+                }
+        
+                if (options.message === Messages.StrictParamDupe) {
+                    throwError(
+                        strict ? options.stricted : options.firstRestricted,
+                        options.message
+                    );
+                }
+        
+                if (defaultCount === 0) {
+                    defaults = [];
+                }
+        
+                return {
+                    params: params,
+                    defaults: defaults,
+                    rest: rest,
+                    stricted: options.stricted,
+                    firstRestricted: options.firstRestricted,
+                    message: options.message
+                };
+            }
+        
+            function parseArrowFunctionExpression(options, node) {
+                var previousStrict, body;
+        
+                expect('=>');
+                previousStrict = strict;
+        
+                body = parseConciseBody();
+        
+                if (strict && options.firstRestricted) {
+                    throwError(options.firstRestricted, options.message);
+                }
+                if (strict && options.stricted) {
+                    throwErrorTolerant(options.stricted, options.message);
+                }
+        
+                strict = previousStrict;
+        
+                return node.finishArrowFunctionExpression(options.params, options.defaults, body, body.type !== Syntax.BlockStatement);
+            }
+        
             // 11.13 Assignment Operators
         
             function parseAssignmentExpression() {
-                var token, left, right, node;
+                var oldParenthesisCount, token, expr, right, list, startToken;
         
+                oldParenthesisCount = state.parenthesisCount;
+        
+                startToken = lookahead;
                 token = lookahead;
-                delegate.markStart();
-                node = left = parseConditionalExpression();
+        
+                expr = parseConditionalExpression();
+        
+                if (expr === PlaceHolders.ArrowParameterPlaceHolder || match('=>')) {
+                    if (state.parenthesisCount === oldParenthesisCount ||
+                            state.parenthesisCount === (oldParenthesisCount + 1)) {
+                        if (expr.type === Syntax.Identifier) {
+                            list = reinterpretAsCoverFormalsList([ expr ]);
+                        } else if (expr.type === Syntax.AssignmentExpression) {
+                            list = reinterpretAsCoverFormalsList([ expr ]);
+                        } else if (expr.type === Syntax.SequenceExpression) {
+                            list = reinterpretAsCoverFormalsList(expr.expressions);
+                        } else if (expr === PlaceHolders.ArrowParameterPlaceHolder) {
+                            list = reinterpretAsCoverFormalsList([]);
+                        }
+                        if (list) {
+                            return parseArrowFunctionExpression(list, new WrappingNode(startToken));
+                        }
+                    }
+                }
         
                 if (matchAssign()) {
                     // LeftHandSideExpression
-                    if (!isLeftHandSide(left)) {
-                        throwError({}, Messages.InvalidLHSInAssignment);
+                    if (!isLeftHandSide(expr)) {
+                        throwErrorTolerant({}, Messages.InvalidLHSInAssignment);
                     }
         
                     // 11.13.1
-                    if (strict && left.type === Syntax.Identifier && isRestrictedWord(left.name)) {
+                    if (strict && expr.type === Syntax.Identifier && isRestrictedWord(expr.name)) {
                         throwErrorTolerant(token, Messages.StrictLHSAssignment);
                     }
         
                     token = lex();
                     right = parseAssignmentExpression();
-                    node = delegate.createAssignmentExpression(token.value, left, right);
+                    expr = new WrappingNode(startToken).finishAssignmentExpression(token.value, expr, right);
                 }
         
-                return delegate.markEndIf(node);
+                return expr;
             }
         
             // 11.14 Comma Operator
         
             function parseExpression() {
-                var expr;
+                var expr, startToken = lookahead, expressions;
         
-                delegate.markStart();
                 expr = parseAssignmentExpression();
         
                 if (match(',')) {
-                    expr = delegate.createSequenceExpression([ expr ]);
+                    expressions = [expr];
         
                     while (index < length) {
                         if (!match(',')) {
                             break;
                         }
                         lex();
-                        expr.expressions.push(parseAssignmentExpression());
+                        expressions.push(parseAssignmentExpression());
                     }
+        
+                    expr = new WrappingNode(startToken).finishSequenceExpression(expressions);
                 }
         
-                return delegate.markEndIf(expr);
+                return expr;
             }
         
             // 12.1 Block
@@ -9047,40 +10458,34 @@
             }
         
             function parseBlock() {
-                var block;
+                var block, node = new Node();
         
-                skipComment();
-                delegate.markStart();
                 expect('{');
         
                 block = parseStatementList();
         
                 expect('}');
         
-                return delegate.markEnd(delegate.createBlockStatement(block));
+                return node.finishBlockStatement(block);
             }
         
             // 12.2 Variable Statement
         
             function parseVariableIdentifier() {
-                var token;
+                var token, node = new Node();
         
-                skipComment();
-                delegate.markStart();
                 token = lex();
         
                 if (token.type !== Token.Identifier) {
                     throwUnexpected(token);
                 }
         
-                return delegate.markEnd(delegate.createIdentifier(token.value));
+                return node.finishIdentifier(token.value);
             }
         
             function parseVariableDeclaration(kind) {
-                var init = null, id;
+                var init = null, id, node = new Node();
         
-                skipComment();
-                delegate.markStart();
                 id = parseVariableIdentifier();
         
                 // 12.2.1
@@ -9096,7 +10501,7 @@
                     init = parseAssignmentExpression();
                 }
         
-                return delegate.markEnd(delegate.createVariableDeclarator(id, init));
+                return node.finishVariableDeclarator(id, init);
             }
         
             function parseVariableDeclarationList(kind) {
@@ -9113,7 +10518,7 @@
                 return list;
             }
         
-            function parseVariableStatement() {
+            function parseVariableStatement(node) {
                 var declarations;
         
                 expectKeyword('var');
@@ -9122,7 +10527,7 @@
         
                 consumeSemicolon();
         
-                return delegate.createVariableDeclaration(declarations, 'var');
+                return node.finishVariableDeclaration(declarations, 'var');
             }
         
             // kind may be `const` or `let`
@@ -9130,10 +10535,7 @@
             // see http://wiki.ecmascript.org/doku.php?id=harmony:const
             // and http://wiki.ecmascript.org/doku.php?id=harmony:let
             function parseConstLetDeclaration(kind) {
-                var declarations;
-        
-                skipComment();
-                delegate.markStart();
+                var declarations, node = new Node();
         
                 expectKeyword(kind);
         
@@ -9141,27 +10543,28 @@
         
                 consumeSemicolon();
         
-                return delegate.markEnd(delegate.createVariableDeclaration(declarations, kind));
+                return node.finishVariableDeclaration(declarations, kind);
             }
         
             // 12.3 Empty Statement
         
             function parseEmptyStatement() {
+                var node = new Node();
                 expect(';');
-                return delegate.createEmptyStatement();
+                return node.finishEmptyStatement();
             }
         
             // 12.4 Expression Statement
         
-            function parseExpressionStatement() {
+            function parseExpressionStatement(node) {
                 var expr = parseExpression();
                 consumeSemicolon();
-                return delegate.createExpressionStatement(expr);
+                return node.finishExpressionStatement(expr);
             }
         
             // 12.5 If statement
         
-            function parseIfStatement() {
+            function parseIfStatement(node) {
                 var test, consequent, alternate;
         
                 expectKeyword('if');
@@ -9181,12 +10584,12 @@
                     alternate = null;
                 }
         
-                return delegate.createIfStatement(test, consequent, alternate);
+                return node.finishIfStatement(test, consequent, alternate);
             }
         
             // 12.6 Iteration Statements
         
-            function parseDoWhileStatement() {
+            function parseDoWhileStatement(node) {
                 var body, test, oldInIteration;
         
                 expectKeyword('do');
@@ -9210,10 +10613,10 @@
                     lex();
                 }
         
-                return delegate.createDoWhileStatement(body, test);
+                return node.finishDoWhileStatement(body, test);
             }
         
-            function parseWhileStatement() {
+            function parseWhileStatement(node) {
                 var test, body, oldInIteration;
         
                 expectKeyword('while');
@@ -9231,21 +10634,20 @@
         
                 state.inIteration = oldInIteration;
         
-                return delegate.createWhileStatement(test, body);
+                return node.finishWhileStatement(test, body);
             }
         
             function parseForVariableDeclaration() {
-                var token, declarations;
+                var token, declarations, node = new Node();
         
-                delegate.markStart();
                 token = lex();
                 declarations = parseVariableDeclarationList();
         
-                return delegate.markEnd(delegate.createVariableDeclaration(declarations, token.value));
+                return node.finishVariableDeclaration(declarations, token.value);
             }
         
-            function parseForStatement() {
-                var init, test, update, left, right, body, oldInIteration;
+            function parseForStatement(node) {
+                var init, test, update, left, right, body, oldInIteration, previousAllowIn = state.allowIn;
         
                 init = test = update = null;
         
@@ -9259,7 +10661,7 @@
                     if (matchKeyword('var') || matchKeyword('let')) {
                         state.allowIn = false;
                         init = parseForVariableDeclaration();
-                        state.allowIn = true;
+                        state.allowIn = previousAllowIn;
         
                         if (init.declarations.length === 1 && matchKeyword('in')) {
                             lex();
@@ -9270,12 +10672,12 @@
                     } else {
                         state.allowIn = false;
                         init = parseExpression();
-                        state.allowIn = true;
+                        state.allowIn = previousAllowIn;
         
                         if (matchKeyword('in')) {
                             // LeftHandSideExpression
                             if (!isLeftHandSide(init)) {
-                                throwError({}, Messages.InvalidLHSInForIn);
+                                throwErrorTolerant({}, Messages.InvalidLHSInForIn);
                             }
         
                             lex();
@@ -9312,26 +10714,26 @@
                 state.inIteration = oldInIteration;
         
                 return (typeof left === 'undefined') ?
-                        delegate.createForStatement(init, test, update, body) :
-                        delegate.createForInStatement(left, right, body);
+                        node.finishForStatement(init, test, update, body) :
+                        node.finishForInStatement(left, right, body);
             }
         
             // 12.7 The continue statement
         
-            function parseContinueStatement() {
+            function parseContinueStatement(node) {
                 var label = null, key;
         
                 expectKeyword('continue');
         
                 // Optimize the most common form: 'continue;'.
-                if (source.charCodeAt(index) === 59) {
+                if (source.charCodeAt(index) === 0x3B) {
                     lex();
         
                     if (!state.inIteration) {
                         throwError({}, Messages.IllegalContinue);
                     }
         
-                    return delegate.createContinueStatement(null);
+                    return node.finishContinueStatement(null);
                 }
         
                 if (peekLineTerminator()) {
@@ -9339,7 +10741,7 @@
                         throwError({}, Messages.IllegalContinue);
                     }
         
-                    return delegate.createContinueStatement(null);
+                    return node.finishContinueStatement(null);
                 }
         
                 if (lookahead.type === Token.Identifier) {
@@ -9357,25 +10759,25 @@
                     throwError({}, Messages.IllegalContinue);
                 }
         
-                return delegate.createContinueStatement(label);
+                return node.finishContinueStatement(label);
             }
         
             // 12.8 The break statement
         
-            function parseBreakStatement() {
+            function parseBreakStatement(node) {
                 var label = null, key;
         
                 expectKeyword('break');
         
-                // Catch the very common case first: immediately a semicolon (char #59).
-                if (source.charCodeAt(index) === 59) {
+                // Catch the very common case first: immediately a semicolon (U+003B).
+                if (source.charCodeAt(index) === 0x3B) {
                     lex();
         
                     if (!(state.inIteration || state.inSwitch)) {
                         throwError({}, Messages.IllegalBreak);
                     }
         
-                    return delegate.createBreakStatement(null);
+                    return node.finishBreakStatement(null);
                 }
         
                 if (peekLineTerminator()) {
@@ -9383,7 +10785,7 @@
                         throwError({}, Messages.IllegalBreak);
                     }
         
-                    return delegate.createBreakStatement(null);
+                    return node.finishBreakStatement(null);
                 }
         
                 if (lookahead.type === Token.Identifier) {
@@ -9401,12 +10803,12 @@
                     throwError({}, Messages.IllegalBreak);
                 }
         
-                return delegate.createBreakStatement(label);
+                return node.finishBreakStatement(label);
             }
         
             // 12.9 The return statement
         
-            function parseReturnStatement() {
+            function parseReturnStatement(node) {
                 var argument = null;
         
                 expectKeyword('return');
@@ -9416,16 +10818,16 @@
                 }
         
                 // 'return' followed by a space and an identifier is very common.
-                if (source.charCodeAt(index) === 32) {
+                if (source.charCodeAt(index) === 0x20) {
                     if (isIdentifierStart(source.charCodeAt(index + 1))) {
                         argument = parseExpression();
                         consumeSemicolon();
-                        return delegate.createReturnStatement(argument);
+                        return node.finishReturnStatement(argument);
                     }
                 }
         
                 if (peekLineTerminator()) {
-                    return delegate.createReturnStatement(null);
+                    return node.finishReturnStatement(null);
                 }
         
                 if (!match(';')) {
@@ -9436,15 +10838,17 @@
         
                 consumeSemicolon();
         
-                return delegate.createReturnStatement(argument);
+                return node.finishReturnStatement(argument);
             }
         
             // 12.10 The with statement
         
-            function parseWithStatement() {
+            function parseWithStatement(node) {
                 var object, body;
         
                 if (strict) {
+                    // TODO(ikarienator): Should we update the test cases instead?
+                    skipComment();
                     throwErrorTolerant({}, Messages.StrictModeWith);
                 }
         
@@ -9458,18 +10862,14 @@
         
                 body = parseStatement();
         
-                return delegate.createWithStatement(object, body);
+                return node.finishWithStatement(object, body);
             }
         
             // 12.10 The swith statement
         
             function parseSwitchCase() {
-                var test,
-                    consequent = [],
-                    statement;
+                var test, consequent = [], statement, node = new Node();
         
-                skipComment();
-                delegate.markStart();
                 if (matchKeyword('default')) {
                     lex();
                     test = null;
@@ -9487,10 +10887,10 @@
                     consequent.push(statement);
                 }
         
-                return delegate.markEnd(delegate.createSwitchCase(test, consequent));
+                return node.finishSwitchCase(test, consequent);
             }
         
-            function parseSwitchStatement() {
+            function parseSwitchStatement(node) {
                 var discriminant, cases, clause, oldInSwitch, defaultFound;
         
                 expectKeyword('switch');
@@ -9503,12 +10903,12 @@
         
                 expect('{');
         
+                cases = [];
+        
                 if (match('}')) {
                     lex();
-                    return delegate.createSwitchStatement(discriminant);
+                    return node.finishSwitchStatement(discriminant, cases);
                 }
-        
-                cases = [];
         
                 oldInSwitch = state.inSwitch;
                 state.inSwitch = true;
@@ -9532,12 +10932,12 @@
         
                 expect('}');
         
-                return delegate.createSwitchStatement(discriminant, cases);
+                return node.finishSwitchStatement(discriminant, cases);
             }
         
             // 12.13 The throw statement
         
-            function parseThrowStatement() {
+            function parseThrowStatement(node) {
                 var argument;
         
                 expectKeyword('throw');
@@ -9550,16 +10950,14 @@
         
                 consumeSemicolon();
         
-                return delegate.createThrowStatement(argument);
+                return node.finishThrowStatement(argument);
             }
         
             // 12.14 The try statement
         
             function parseCatchClause() {
-                var param, body;
+                var param, body, node = new Node();
         
-                skipComment();
-                delegate.markStart();
                 expectKeyword('catch');
         
                 expect('(');
@@ -9575,10 +10973,10 @@
         
                 expect(')');
                 body = parseBlock();
-                return delegate.markEnd(delegate.createCatchClause(param, body));
+                return node.finishCatchClause(param, body);
             }
         
-            function parseTryStatement() {
+            function parseTryStatement(node) {
                 var block, handlers = [], finalizer = null;
         
                 expectKeyword('try');
@@ -9598,17 +10996,17 @@
                     throwError({}, Messages.NoCatchOrFinally);
                 }
         
-                return delegate.createTryStatement(block, [], handlers, finalizer);
+                return node.finishTryStatement(block, [], handlers, finalizer);
             }
         
             // 12.15 The debugger statement
         
-            function parseDebuggerStatement() {
+            function parseDebuggerStatement(node) {
                 expectKeyword('debugger');
         
                 consumeSemicolon();
         
-                return delegate.createDebuggerStatement();
+                return node.finishDebuggerStatement();
             }
         
             // 12 Statements
@@ -9617,58 +11015,58 @@
                 var type = lookahead.type,
                     expr,
                     labeledBody,
-                    key;
+                    key,
+                    node;
         
                 if (type === Token.EOF) {
                     throwUnexpected(lookahead);
                 }
         
-                skipComment();
-                delegate.markStart();
+                if (type === Token.Punctuator && lookahead.value === '{') {
+                    return parseBlock();
+                }
+        
+                node = new Node();
         
                 if (type === Token.Punctuator) {
                     switch (lookahead.value) {
                     case ';':
-                        return delegate.markEnd(parseEmptyStatement());
-                    case '{':
-                        return delegate.markEnd(parseBlock());
+                        return parseEmptyStatement(node);
                     case '(':
-                        return delegate.markEnd(parseExpressionStatement());
+                        return parseExpressionStatement(node);
                     default:
                         break;
                     }
-                }
-        
-                if (type === Token.Keyword) {
+                } else if (type === Token.Keyword) {
                     switch (lookahead.value) {
                     case 'break':
-                        return delegate.markEnd(parseBreakStatement());
+                        return parseBreakStatement(node);
                     case 'continue':
-                        return delegate.markEnd(parseContinueStatement());
+                        return parseContinueStatement(node);
                     case 'debugger':
-                        return delegate.markEnd(parseDebuggerStatement());
+                        return parseDebuggerStatement(node);
                     case 'do':
-                        return delegate.markEnd(parseDoWhileStatement());
+                        return parseDoWhileStatement(node);
                     case 'for':
-                        return delegate.markEnd(parseForStatement());
+                        return parseForStatement(node);
                     case 'function':
-                        return delegate.markEnd(parseFunctionDeclaration());
+                        return parseFunctionDeclaration(node);
                     case 'if':
-                        return delegate.markEnd(parseIfStatement());
+                        return parseIfStatement(node);
                     case 'return':
-                        return delegate.markEnd(parseReturnStatement());
+                        return parseReturnStatement(node);
                     case 'switch':
-                        return delegate.markEnd(parseSwitchStatement());
+                        return parseSwitchStatement(node);
                     case 'throw':
-                        return delegate.markEnd(parseThrowStatement());
+                        return parseThrowStatement(node);
                     case 'try':
-                        return delegate.markEnd(parseTryStatement());
+                        return parseTryStatement(node);
                     case 'var':
-                        return delegate.markEnd(parseVariableStatement());
+                        return parseVariableStatement(node);
                     case 'while':
-                        return delegate.markEnd(parseWhileStatement());
+                        return parseWhileStatement(node);
                     case 'with':
-                        return delegate.markEnd(parseWithStatement());
+                        return parseWithStatement(node);
                     default:
                         break;
                     }
@@ -9688,22 +11086,21 @@
                     state.labelSet[key] = true;
                     labeledBody = parseStatement();
                     delete state.labelSet[key];
-                    return delegate.markEnd(delegate.createLabeledStatement(expr, labeledBody));
+                    return node.finishLabeledStatement(expr, labeledBody);
                 }
         
                 consumeSemicolon();
         
-                return delegate.markEnd(delegate.createExpressionStatement(expr));
+                return node.finishExpressionStatement(expr);
             }
         
             // 13 Function Definition
         
             function parseFunctionSourceElements() {
                 var sourceElement, sourceElements = [], token, directive, firstRestricted,
-                    oldLabelSet, oldInIteration, oldInSwitch, oldInFunctionBody;
+                    oldLabelSet, oldInIteration, oldInSwitch, oldInFunctionBody, oldParenthesisCount,
+                    node = new Node();
         
-                skipComment();
-                delegate.markStart();
                 expect('{');
         
                 while (index < length) {
@@ -9718,7 +11115,7 @@
                         // this is not directive
                         break;
                     }
-                    directive = source.slice(token.range[0] + 1, token.range[1] - 1);
+                    directive = source.slice(token.start + 1, token.end - 1);
                     if (directive === 'use strict') {
                         strict = true;
                         if (firstRestricted) {
@@ -9735,11 +11132,13 @@
                 oldInIteration = state.inIteration;
                 oldInSwitch = state.inSwitch;
                 oldInFunctionBody = state.inFunctionBody;
+                oldParenthesisCount = state.parenthesizedCount;
         
                 state.labelSet = {};
                 state.inIteration = false;
                 state.inSwitch = false;
                 state.inFunctionBody = true;
+                state.parenthesizedCount = 0;
         
                 while (index < length) {
                     if (match('}')) {
@@ -9758,44 +11157,71 @@
                 state.inIteration = oldInIteration;
                 state.inSwitch = oldInSwitch;
                 state.inFunctionBody = oldInFunctionBody;
+                state.parenthesizedCount = oldParenthesisCount;
         
-                return delegate.markEnd(delegate.createBlockStatement(sourceElements));
+                return node.finishBlockStatement(sourceElements);
+            }
+        
+            function validateParam(options, param, name) {
+                var key = '$' + name;
+                if (strict) {
+                    if (isRestrictedWord(name)) {
+                        options.stricted = param;
+                        options.message = Messages.StrictParamName;
+                    }
+                    if (Object.prototype.hasOwnProperty.call(options.paramSet, key)) {
+                        options.stricted = param;
+                        options.message = Messages.StrictParamDupe;
+                    }
+                } else if (!options.firstRestricted) {
+                    if (isRestrictedWord(name)) {
+                        options.firstRestricted = param;
+                        options.message = Messages.StrictParamName;
+                    } else if (isStrictModeReservedWord(name)) {
+                        options.firstRestricted = param;
+                        options.message = Messages.StrictReservedWord;
+                    } else if (Object.prototype.hasOwnProperty.call(options.paramSet, key)) {
+                        options.firstRestricted = param;
+                        options.message = Messages.StrictParamDupe;
+                    }
+                }
+                options.paramSet[key] = true;
+            }
+        
+            function parseParam(options) {
+                var token, param, def;
+        
+                token = lookahead;
+                param = parseVariableIdentifier();
+                validateParam(options, token, token.value);
+                if (match('=')) {
+                    lex();
+                    def = parseAssignmentExpression();
+                    ++options.defaultCount;
+                }
+        
+                options.params.push(param);
+                options.defaults.push(def);
+        
+                return !match(')');
             }
         
             function parseParams(firstRestricted) {
-                var param, params = [], token, stricted, paramSet, key, message;
+                var options;
+        
+                options = {
+                    params: [],
+                    defaultCount: 0,
+                    defaults: [],
+                    firstRestricted: firstRestricted
+                };
+        
                 expect('(');
         
                 if (!match(')')) {
-                    paramSet = {};
+                    options.paramSet = {};
                     while (index < length) {
-                        token = lookahead;
-                        param = parseVariableIdentifier();
-                        key = '$' + token.value;
-                        if (strict) {
-                            if (isRestrictedWord(token.value)) {
-                                stricted = token;
-                                message = Messages.StrictParamName;
-                            }
-                            if (Object.prototype.hasOwnProperty.call(paramSet, key)) {
-                                stricted = token;
-                                message = Messages.StrictParamDupe;
-                            }
-                        } else if (!firstRestricted) {
-                            if (isRestrictedWord(token.value)) {
-                                firstRestricted = token;
-                                message = Messages.StrictParamName;
-                            } else if (isStrictModeReservedWord(token.value)) {
-                                firstRestricted = token;
-                                message = Messages.StrictReservedWord;
-                            } else if (Object.prototype.hasOwnProperty.call(paramSet, key)) {
-                                firstRestricted = token;
-                                message = Messages.StrictParamDupe;
-                            }
-                        }
-                        params.push(param);
-                        paramSet[key] = true;
-                        if (match(')')) {
+                        if (!parseParam(options)) {
                             break;
                         }
                         expect(',');
@@ -9804,19 +11230,21 @@
         
                 expect(')');
         
+                if (options.defaultCount === 0) {
+                    options.defaults = [];
+                }
+        
                 return {
-                    params: params,
-                    stricted: stricted,
-                    firstRestricted: firstRestricted,
-                    message: message
+                    params: options.params,
+                    defaults: options.defaults,
+                    stricted: options.stricted,
+                    firstRestricted: options.firstRestricted,
+                    message: options.message
                 };
             }
         
             function parseFunctionDeclaration() {
-                var id, params = [], body, token, stricted, tmp, firstRestricted, message, previousStrict;
-        
-                skipComment();
-                delegate.markStart();
+                var id, params = [], defaults = [], body, token, stricted, tmp, firstRestricted, message, previousStrict, node = new Node();
         
                 expectKeyword('function');
                 token = lookahead;
@@ -9837,6 +11265,7 @@
         
                 tmp = parseParams(firstRestricted);
                 params = tmp.params;
+                defaults = tmp.defaults;
                 stricted = tmp.stricted;
                 firstRestricted = tmp.firstRestricted;
                 if (tmp.message) {
@@ -9853,13 +11282,13 @@
                 }
                 strict = previousStrict;
         
-                return delegate.markEnd(delegate.createFunctionDeclaration(id, params, [], body));
+                return node.finishFunctionDeclaration(id, params, defaults, body);
             }
         
             function parseFunctionExpression() {
-                var token, id = null, stricted, firstRestricted, message, tmp, params = [], body, previousStrict;
+                var token, id = null, stricted, firstRestricted, message, tmp,
+                    params = [], defaults = [], body, previousStrict, node = new Node();
         
-                delegate.markStart();
                 expectKeyword('function');
         
                 if (!match('(')) {
@@ -9882,6 +11311,7 @@
         
                 tmp = parseParams(firstRestricted);
                 params = tmp.params;
+                defaults = tmp.defaults;
                 stricted = tmp.stricted;
                 firstRestricted = tmp.firstRestricted;
                 if (tmp.message) {
@@ -9898,7 +11328,7 @@
                 }
                 strict = previousStrict;
         
-                return delegate.markEnd(delegate.createFunctionExpression(id, params, [], body));
+                return node.finishFunctionExpression(id, params, defaults, body);
             }
         
             // 14 Program
@@ -9936,7 +11366,7 @@
                         // this is not directive
                         break;
                     }
-                    directive = source.slice(token.range[0] + 1, token.range[1] - 1);
+                    directive = source.slice(token.start + 1, token.end - 1);
                     if (directive === 'use strict') {
                         strict = true;
                         if (firstRestricted) {
@@ -9951,6 +11381,7 @@
         
                 while (index < length) {
                     sourceElement = parseSourceElement();
+                    /* istanbul ignore if */
                     if (typeof sourceElement === 'undefined') {
                         break;
                     }
@@ -9960,87 +11391,15 @@
             }
         
             function parseProgram() {
-                var body;
+                var body, node;
         
                 skipComment();
-                delegate.markStart();
-                strict = false;
                 peek();
+                node = new Node();
+                strict = false;
+        
                 body = parseSourceElements();
-                return delegate.markEnd(delegate.createProgram(body));
-            }
-        
-            function collectToken() {
-                var start, loc, token, range, value;
-        
-                skipComment();
-                start = index;
-                loc = {
-                    start: {
-                        line: lineNumber,
-                        column: index - lineStart
-                    }
-                };
-        
-                token = extra.advance();
-                loc.end = {
-                    line: lineNumber,
-                    column: index - lineStart
-                };
-        
-                if (token.type !== Token.EOF) {
-                    range = [token.range[0], token.range[1]];
-                    value = source.slice(token.range[0], token.range[1]);
-                    extra.tokens.push({
-                        type: TokenName[token.type],
-                        value: value,
-                        range: range,
-                        loc: loc
-                    });
-                }
-        
-                return token;
-            }
-        
-            function collectRegex() {
-                var pos, loc, regex, token;
-        
-                skipComment();
-        
-                pos = index;
-                loc = {
-                    start: {
-                        line: lineNumber,
-                        column: index - lineStart
-                    }
-                };
-        
-                regex = extra.scanRegExp();
-                loc.end = {
-                    line: lineNumber,
-                    column: index - lineStart
-                };
-        
-                if (!extra.tokenize) {
-                    // Pop the previous token, which is likely '/' or '/='
-                    if (extra.tokens.length > 0) {
-                        token = extra.tokens[extra.tokens.length - 1];
-                        if (token.range[0] === pos && token.type === 'Punctuator') {
-                            if (token.value === '/' || token.value === '/=') {
-                                extra.tokens.pop();
-                            }
-                        }
-                    }
-        
-                    extra.tokens.push({
-                        type: 'RegularExpression',
-                        value: regex.literal,
-                        range: [pos, index],
-                        loc: loc
-                    });
-                }
-        
-                return regex;
+                return node.finishProgram(body);
             }
         
             function filterTokenLocation() {
@@ -10064,64 +11423,8 @@
                 extra.tokens = tokens;
             }
         
-            function createLocationMarker() {
-        
-                if (!extra.loc && !extra.range) {
-                    return null;
-                }
-        
-                skipComment();
-        
-                return {
-                    marker: [index, lineNumber, index - lineStart, 0, 0, 0],
-        
-                    end: function () {
-                        this.marker[3] = index;
-                        this.marker[4] = lineNumber;
-                        this.marker[5] = index - lineStart;
-                    },
-        
-                    apply: function (node) {
-                        if (extra.range) {
-                            node.range = [this.marker[0], this.marker[3]];
-                        }
-                        if (extra.loc) {
-                            node.loc = {
-                                start: {
-                                    line: this.marker[1],
-                                    column: this.marker[2]
-                                },
-                                end: {
-                                    line: this.marker[4],
-                                    column: this.marker[5]
-                                }
-                            };
-                        }
-                        node = delegate.postProcess(node);
-                    }
-                };
-            }
-        
-            function patch() {
-                if (typeof extra.tokens !== 'undefined') {
-                    extra.advance = advance;
-                    extra.scanRegExp = scanRegExp;
-        
-                    advance = collectToken;
-                    scanRegExp = collectRegex;
-                }
-            }
-        
-            function unpatch() {
-                if (typeof extra.scanRegExp === 'function') {
-                    advance = extra.advance;
-                    scanRegExp = extra.scanRegExp;
-                }
-            }
-        
             function tokenize(code, options) {
                 var toString,
-                    token,
                     tokens;
         
                 toString = String;
@@ -10129,7 +11432,6 @@
                     code = toString(code);
                 }
         
-                delegate = SyntaxTreeDelegate;
                 source = code;
                 index = 0;
                 lineNumber = (source.length > 0) ? 1 : 0;
@@ -10142,7 +11444,7 @@
                     inFunctionBody: false,
                     inIteration: false,
                     inSwitch: false,
-                    lastCommentStart: -1,
+                    lastCommentStart: -1
                 };
         
                 extra = {};
@@ -10168,31 +11470,17 @@
                     extra.errors = [];
                 }
         
-                if (length > 0) {
-                    if (typeof source[0] === 'undefined') {
-                        // Try first to convert to a string. This is good as fast path
-                        // for old IE which understands string indexing for string
-                        // literals only and not for string object.
-                        if (code instanceof String) {
-                            source = code.valueOf();
-                        }
-                    }
-                }
-        
-                patch();
-        
                 try {
                     peek();
                     if (lookahead.type === Token.EOF) {
                         return extra.tokens;
                     }
         
-                    token = lex();
+                    lex();
                     while (lookahead.type !== Token.EOF) {
                         try {
-                            token = lex();
+                            lex();
                         } catch (lexError) {
-                            token = lookahead;
                             if (extra.errors) {
                                 extra.errors.push(lexError);
                                 // We have to break on the first error
@@ -10215,7 +11503,6 @@
                 } catch (e) {
                     throw e;
                 } finally {
-                    unpatch();
                     extra = {};
                 }
                 return tokens;
@@ -10229,7 +11516,6 @@
                     code = toString(code);
                 }
         
-                delegate = SyntaxTreeDelegate;
                 source = code;
                 index = 0;
                 lineNumber = (source.length > 0) ? 1 : 0;
@@ -10239,17 +11525,18 @@
                 state = {
                     allowIn: true,
                     labelSet: {},
+                    parenthesisCount: 0,
                     inFunctionBody: false,
                     inIteration: false,
                     inSwitch: false,
-                    lastCommentStart: -1,
-                    markerStack: []
+                    lastCommentStart: -1
                 };
         
                 extra = {};
                 if (typeof options !== 'undefined') {
                     extra.range = (typeof options.range === 'boolean') && options.range;
                     extra.loc = (typeof options.loc === 'boolean') && options.loc;
+                    extra.attachComment = (typeof options.attachComment === 'boolean') && options.attachComment;
         
                     if (extra.loc && options.source !== null && options.source !== undefined) {
                         extra.source = toString(options.source);
@@ -10264,20 +11551,15 @@
                     if (typeof options.tolerant === 'boolean' && options.tolerant) {
                         extra.errors = [];
                     }
-                }
-        
-                if (length > 0) {
-                    if (typeof source[0] === 'undefined') {
-                        // Try first to convert to a string. This is good as fast path
-                        // for old IE which understands string indexing for string
-                        // literals only and not for string object.
-                        if (code instanceof String) {
-                            source = code.valueOf();
-                        }
+                    if (extra.attachComment) {
+                        extra.range = true;
+                        extra.comments = [];
+                        extra.bottomRightStack = [];
+                        extra.trailingComments = [];
+                        extra.leadingComments = [];
                     }
                 }
         
-                patch();
                 try {
                     program = parseProgram();
                     if (typeof extra.comments !== 'undefined') {
@@ -10293,21 +11575,21 @@
                 } catch (e) {
                     throw e;
                 } finally {
-                    unpatch();
                     extra = {};
                 }
         
                 return program;
             }
         
-            // Sync with package.json and component.json.
-            exports.version = '1.1.0-dev';
+            // Sync with *.json manifests.
+            exports.version = '2.0.0-dev';
         
             exports.tokenize = tokenize;
         
             exports.parse = parse;
         
             // Deep copy.
+           /* istanbul ignore next */
             exports.Syntax = (function () {
                 var name, types = {};
         
